@@ -22,16 +22,19 @@ class ProgressTracker {
     const calculatedProgress = progress ?? Math.round((this.currentStep / this.totalSteps) * 100);
     const data = { step: this.currentStep, totalSteps: this.totalSteps, progress: calculatedProgress, message, timestamp: Date.now() };
     this.res.write(`data: ${JSON.stringify(data)}\n\n`);
+    this.res.flush?.(); // flush for Cloud Run streaming
   }
 
   complete(videoUrl) {
     const data = { step: this.totalSteps, totalSteps: this.totalSteps, progress: 100, message: 'Complete!', videoUrl, complete: true, timestamp: Date.now() };
     this.res.write(`data: ${JSON.stringify(data)}\n\n`);
+    this.res.flush?.();
     this.res.end();
   }
 
   error(errorMessage) {
     this.res.write(`data: ${JSON.stringify({ error: errorMessage, timestamp: Date.now() })}\n\n`);
+    this.res.flush?.();
     this.res.end();
   }
 }
@@ -73,6 +76,8 @@ functions.http('processVideos', async (req, res) => {
     const { sessionId, title, ranks, videoOrder, filePaths } = req.body;
     if (!sessionId || !title || !ranks || !filePaths) throw new Error('Missing required data');
 
+    console.log('[processVideos] Start', req.body);
+
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedVideoOrder = typeof videoOrder === 'string' ? JSON.parse(videoOrder) : videoOrder;
 
@@ -93,6 +98,7 @@ functions.http('processVideos', async (req, res) => {
 
     tracker.complete(publicUrl);
   } catch (error) {
+    console.error('[processVideos] Error:', error);
     tracker.error(error.message);
     await cleanup(req.body.sessionId || 'unknown').catch(() => {});
   }
@@ -102,6 +108,7 @@ async function downloadVideos(filePaths) {
   const localFiles = [];
   for (let i = 0; i < filePaths.length; i++) {
     const localPath = `/tmp/input_${i}_${uuidv4()}.mp4`;
+    console.log(`[downloadVideos] Downloading ${filePaths[i]} to ${localPath}`);
     await cacheBucket.file(filePaths[i]).download({ destination: localPath });
     localFiles.push(localPath);
   }
@@ -114,6 +121,7 @@ async function processVideos(files, title, ranks, videoOrder) {
 
   for (let i = 0; i < sortedFiles.length; i++) {
     const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
+    console.log(`[processVideos] Overlaying text on video ${sortedFiles[i]}`);
     await addTextOverlay(sortedFiles[i], outputPath, title, ranks, i + 1);
     processedVideos.push(outputPath);
   }
@@ -123,12 +131,13 @@ async function processVideos(files, title, ranks, videoOrder) {
 
 function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
   return new Promise((resolve, reject) => {
+    console.log('[addTextOverlay] Start');
     const titleFontSize = 140;
     const rankFontSize = 80;
     const titleY = 60;
     const rankStartY = titleY + titleFontSize + 40;
     const rankSpacing = rankFontSize + 30;
-    const fontParam = 'fontfile=/usr/share/fonts/truetype/DejaVuSans.ttf';
+    const fontParam = 'fontfile=/usr/share/fonts/truetype/myfont.ttf';
 
     let filter = 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2';
     filter += `,drawtext=${fontParam}:fontsize=${titleFontSize}:text='${title.replace(/[':]/g, '\\$&')}':fontcolor=white:box=0:borderw=8:bordercolor=black:x=(w-text_w)/2:y=${titleY}`;
@@ -144,6 +153,8 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
       filter += `,drawtext=${fontParam}:fontsize=${rankFontSize}:text=' ${rankText.replace(/[':]/g, '\\$&')}':fontcolor=white:box=0:borderw=6:bordercolor=black:x=160:y=${y}`;
     }
 
+    console.log('[addTextOverlay] Running ffmpeg command');
+
     const ffmpeg = spawn('ffmpeg', [
       '-i', inputPath,
       '-vf', filter,
@@ -158,10 +169,13 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
     let stderrOutput = '';
 
     ffmpeg.stderr.on('data', (data) => {
-      stderrOutput += data.toString();
+      const msg = data.toString();
+      stderrOutput += msg;
+      console.error('[FFmpeg stderr]', msg);
     });
 
     ffmpeg.on('close', (code) => {
+      console.log(`[ffmpeg] Process exited with code ${code}`);
       if (code === 0) {
         resolve();
       } else {
@@ -170,6 +184,7 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
     });
 
     ffmpeg.on('error', (error) => {
+      console.error('[ffmpeg] Spawn error:', error);
       reject(new Error(`FFmpeg spawn error: ${error.message}`));
     });
   });
@@ -193,7 +208,9 @@ function concatenateVideos(inputPaths) {
     let stderrOutput = '';
 
     ffmpeg.stderr.on('data', (data) => {
-      stderrOutput += data.toString();
+      const msg = data.toString();
+      stderrOutput += msg;
+      console.error('[FFmpeg stderr]', msg);
     });
 
     ffmpeg.on('close', (code) => {
