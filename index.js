@@ -128,7 +128,7 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
     const titleY = 60;
     const rankStartY = titleY + titleFontSize + 40;
     const rankSpacing = rankFontSize + 30;
-    const fontParam = 'fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+    const fontParam = 'fontfile=/usr/share/fonts/truetype/DejaVuSans.ttf';
 
     let filter = 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2';
     filter += `,drawtext=${fontParam}:fontsize=${titleFontSize}:text='${title.replace(/[':]/g, '\\$&')}':fontcolor=white:box=0:borderw=8:bordercolor=black:x=(w-text_w)/2:y=${titleY}`;
