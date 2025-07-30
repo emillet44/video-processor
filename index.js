@@ -52,6 +52,7 @@ functions.http('processVideos', async (req, res) => {
       if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
 
       const uploadUrls = [];
+      const filePaths = [];
       for (let i = 0; i < videoCount; i++) {
         const fileName = `${sessionId}/video_${i}.mp4`;
         const [url] = await cacheBucket.file(fileName).getSignedUrl({
@@ -61,9 +62,10 @@ functions.http('processVideos', async (req, res) => {
           contentType: 'video/mp4',
         });
         uploadUrls.push({ index: i, url });
+        filePaths.push(fileName);
       }
 
-      return res.json({ uploadUrls, sessionId });
+      return res.json({ uploadUrls, filePaths, sessionId });
     } catch (error) {
       return res.status(500).json({ error: 'Failed to generate upload URLs' });
     }
@@ -100,7 +102,7 @@ functions.http('processVideos', async (req, res) => {
   } catch (error) {
     console.error('[processVideos] Error:', error);
     tracker.error(error.message);
-    await cleanup(req.body.sessionId || 'unknown').catch(() => {});
+    await cleanup(req.body.sessionId || 'unknown').catch(() => { });
   }
 });
 
@@ -240,20 +242,20 @@ async function cleanup(sessionId, localFiles = []) {
   localFiles.forEach(filePath => {
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch {}
+    } catch { }
   });
 
   try {
     const tempFiles = fs.readdirSync('/tmp').filter(f => f.includes('input_') || f.includes('processed_') || f.includes('final_'));
     tempFiles.forEach(f => {
-      try { fs.unlinkSync(`/tmp/${f}`); } catch {}
+      try { fs.unlinkSync(`/tmp/${f}`); } catch { }
     });
-  } catch {}
+  } catch { }
 
   if (sessionId && sessionId !== 'unknown') {
     try {
       const [files] = await cacheBucket.getFiles({ prefix: `${sessionId}/` });
-      await Promise.all(files.map(file => file.delete().catch(() => {})));
-    } catch {}
+      await Promise.all(files.map(file => file.delete().catch(() => { })));
+    } catch { }
   }
 }
