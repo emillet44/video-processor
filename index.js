@@ -230,12 +230,19 @@ function concatenateVideos(inputPaths) {
 
 async function uploadToGCS(filePath, fileName) {
   const destination = `processed/${fileName}`;
+
   await outputBucket.upload(filePath, {
     destination,
-    metadata: { cacheControl: 'public, max-age=31536000' },
+    metadata: { cacheControl: 'public, max-age=31536000' }, // optional, good for performance
   });
-  await outputBucket.file(destination).makePublic();
-  return `https://storage.googleapis.com/ranktop-v/${destination}`;
+
+  const [signedUrl] = await outputBucket.file(destination).getSignedUrl({
+    version: 'v4',
+    action: 'read',
+    expires: Date.now() + 60 * 60 * 1000, // 1 hour
+  });
+
+  return signedUrl;
 }
 
 async function cleanup(sessionId, localFiles = []) {
