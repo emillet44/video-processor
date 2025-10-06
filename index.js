@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { createCanvas } = require('canvas');
 
 const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
@@ -35,19 +36,12 @@ const LAYOUT_CONFIG = {
 
 const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
 
-/**
- * Fits text into a bounding box by iteratively reducing font size
- * Returns the optimal font size and wrapped lines
- */
-function fitTextToBox(text, boxWidth, maxLines, initialFontSize, minFontSize = 20) {
-  let fontSize = initialFontSize;
+function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
+  const canvas = createCanvas(boxWidth, 100);
+  const ctx = canvas.getContext('2d');
   
-  // Approximate character width as a fraction of font size
-  // This is a rough estimation since we can't measure actual text width in Node
-  const avgCharWidth = fontSize * 0.6;
-  
-  while (fontSize >= minFontSize) {
-    const maxCharsPerLine = Math.floor(boxWidth / (fontSize * 0.6));
+  for (let fontSize = initialFontSize; fontSize >= 1; fontSize -= 2) {
+    ctx.font = `${fontSize}px Arial`; // Change font family as needed
     
     const words = text.split(' ');
     const lines = [];
@@ -55,8 +49,9 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize, minFontSize = 2
     
     for (const word of words) {
       const testLine = currentLine ? `${currentLine} ${word}` : word;
+      const metrics = ctx.measureText(testLine);
       
-      if (testLine.length <= maxCharsPerLine) {
+      if (metrics.width <= boxWidth) {
         currentLine = testLine;
       } else {
         if (currentLine) lines.push(currentLine);
@@ -65,33 +60,10 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize, minFontSize = 2
     }
     if (currentLine) lines.push(currentLine);
     
-    // If text fits within max lines, we're done
     if (lines.length <= maxLines) {
       return { fontSize, lines };
     }
-    
-    // Reduce font size and try again
-    fontSize -= 2;
   }
-  
-  // If it never fits, return minimum size attempt
-  const maxCharsPerLine = Math.floor(boxWidth / (minFontSize * 0.6));
-  const words = text.split(' ');
-  const lines = [];
-  let currentLine = '';
-  
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    if (testLine.length <= maxCharsPerLine) {
-      currentLine = testLine;
-    } else {
-      if (currentLine) lines.push(currentLine);
-      currentLine = word;
-    }
-  }
-  if (currentLine) lines.push(currentLine);
-  
-  return { fontSize: minFontSize, lines };
 }
 
 class ProgressTracker {
