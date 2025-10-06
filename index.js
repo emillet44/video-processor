@@ -30,7 +30,7 @@ const LAYOUT_CONFIG = {
   watermarkFontSize: 48,
   watermarkAlpha: '0.7',
   watermarkPadding: 20,
-  fontPath: path.join(__dirname, 'font.ttf')
+  fontPath: '/usr/share/fonts/truetype/myfont.ttf'
 };
 
 const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
