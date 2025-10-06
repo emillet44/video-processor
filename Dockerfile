@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
   && rm -rf /var/lib/apt/lists/*
 
 # Add your custom font (assumes it's named myfont.ttf)
-COPY DejaVuSans.ttf /usr/share/fonts/truetype/DejaVuSans.ttf
+COPY font.ttf /usr/share/fonts/truetype/font.ttf
 
 # Rebuild font cache so ffmpeg can detect it
 RUN fc-cache -f -v
