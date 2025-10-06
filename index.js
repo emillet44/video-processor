@@ -2,13 +2,97 @@ const functions = require('@google-cloud/functions-framework');
 const { Storage } = require('@google-cloud/storage');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
 const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
 const outputBucket = storage.bucket('ranktop-v');
 
-const getRankColor = (idx) => ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'][idx] || 'white';
+// Layout configuration - centralized for easy updates
+const LAYOUT_CONFIG = {
+  titleFontSize: 140,
+  titleY: 0,
+  titleBoxTopPadding: 50,
+  titleBoxBottomPadding: 30,
+  titleLineSpacing: 10,
+  titleBoxWidth: 980,
+  titleMaxLines: 2,
+  rankFontSize: 60,
+  rankStartY: 290,
+  rankSpacing: 140,
+  rankNumX: 45,
+  rankTextX: 125,
+  rankBoxWidth: 830,
+  rankMaxLines: 1,
+  rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
+  watermarkText: 'ranktop.net',
+  watermarkFontSize: 48,
+  watermarkAlpha: '0.7',
+  watermarkPadding: 20,
+  fontPath: path.join(__dirname, 'font.ttf')
+};
+
+const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
+
+/**
+ * Fits text into a bounding box by iteratively reducing font size
+ * Returns the optimal font size and wrapped lines
+ */
+function fitTextToBox(text, boxWidth, maxLines, initialFontSize, minFontSize = 20) {
+  let fontSize = initialFontSize;
+  
+  // Approximate character width as a fraction of font size
+  // This is a rough estimation since we can't measure actual text width in Node
+  const avgCharWidth = fontSize * 0.6;
+  
+  while (fontSize >= minFontSize) {
+    const maxCharsPerLine = Math.floor(boxWidth / (fontSize * 0.6));
+    
+    const words = text.split(' ');
+    const lines = [];
+    let currentLine = '';
+    
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      
+      if (testLine.length <= maxCharsPerLine) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) lines.push(currentLine);
+        currentLine = word;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    
+    // If text fits within max lines, we're done
+    if (lines.length <= maxLines) {
+      return { fontSize, lines };
+    }
+    
+    // Reduce font size and try again
+    fontSize -= 2;
+  }
+  
+  // If it never fits, return minimum size attempt
+  const maxCharsPerLine = Math.floor(boxWidth / (minFontSize * 0.6));
+  const words = text.split(' ');
+  const lines = [];
+  let currentLine = '';
+  
+  for (const word of words) {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    if (testLine.length <= maxCharsPerLine) {
+      currentLine = testLine;
+    } else {
+      if (currentLine) lines.push(currentLine);
+      currentLine = word;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+  
+  return { fontSize: minFontSize, lines };
+}
 
 class ProgressTracker {
   constructor(res) {
@@ -22,7 +106,7 @@ class ProgressTracker {
     const calculatedProgress = progress ?? Math.round((this.currentStep / this.totalSteps) * 100);
     const data = { step: this.currentStep, totalSteps: this.totalSteps, progress: calculatedProgress, message, timestamp: Date.now() };
     this.res.write(`data: ${JSON.stringify(data)}\n\n`);
-    this.res.flush?.(); // flush for Cloud Run streaming
+    this.res.flush?.();
   }
 
   complete(videoUrl) {
@@ -134,26 +218,68 @@ async function processVideos(files, title, ranks, videoOrder) {
 function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
   return new Promise((resolve, reject) => {
     console.log('[addTextOverlay] Start');
-    const titleFontSize = 140;
-    const rankFontSize = 80;
-    const titleY = 60;
-    const rankStartY = titleY + titleFontSize + 40;
-    const rankSpacing = rankFontSize + 30;
-    const fontParam = 'fontfile=/usr/share/fonts/truetype/myfont.ttf';
-
-    let filter = 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2';
-    filter += `,drawtext=${fontParam}:fontsize=${titleFontSize}:text='${title.replace(/[':]/g, '\\$&')}':fontcolor=white:box=0:borderw=8:bordercolor=black:x=(w-text_w)/2:y=${titleY}`;
-
+    
+    const fontParam = `fontfile=${LAYOUT_CONFIG.fontPath}`;
+    
+    // Start with scale and crop
+    let filter = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920';
+    
+    // Fit title text to box
+    const titleResult = fitTextToBox(
+      title,
+      LAYOUT_CONFIG.titleBoxWidth,
+      LAYOUT_CONFIG.titleMaxLines,
+      LAYOUT_CONFIG.titleFontSize
+    );
+    
+    // Calculate title box dimensions
+    const numLines = titleResult.lines.length;
+    const textContentHeight = (numLines * titleResult.fontSize) + 
+                             ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
+    const boxHeight = LAYOUT_CONFIG.titleBoxTopPadding + 
+                     textContentHeight + 
+                     LAYOUT_CONFIG.titleBoxBottomPadding;
+    
+    // Add black box behind title
+    filter += `,drawbox=y=${LAYOUT_CONFIG.titleY}:color=black:width=1080:height=${boxHeight}:t=fill`;
+    
+    // Add title text lines
+    let currentY = LAYOUT_CONFIG.titleY + LAYOUT_CONFIG.titleBoxTopPadding;
+    for (const line of titleResult.lines) {
+      const escapedLine = line.replace(/[':]/g, '\\$&');
+      filter += `,drawtext=${fontParam}:fontsize=${titleResult.fontSize}:text='${escapedLine}':fontcolor=white:x=(w-text_w)/2:y=${currentY}`;
+      currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+    }
+    
+    // Add rank overlays
     for (let i = 0; i < ranksToShow; i++) {
       const rankIdx = ranks.length - ranksToShow + i;
-      const y = rankStartY + i * rankSpacing;
-      const rankNumber = rankIdx + 1;
+      const y = LAYOUT_CONFIG.rankStartY + (rankIdx * LAYOUT_CONFIG.rankSpacing);
+      
       const rankText = ranks[rankIdx];
       const rankColor = getRankColor(rankIdx);
-
-      filter += `,drawtext=${fontParam}:fontsize=${rankFontSize}:text='${rankNumber}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=80:y=${y}`;
-      filter += `,drawtext=${fontParam}:fontsize=${rankFontSize}:text=' ${rankText.replace(/[':]/g, '\\$&')}':fontcolor=white:box=0:borderw=6:bordercolor=black:x=160:y=${y}`;
+      
+      // Fit rank text to box
+      const rankResult = fitTextToBox(
+        rankText,
+        LAYOUT_CONFIG.rankBoxWidth,
+        LAYOUT_CONFIG.rankMaxLines,
+        LAYOUT_CONFIG.rankFontSize
+      );
+      
+      // Add rank number
+      filter += `,drawtext=${fontParam}:fontsize=${LAYOUT_CONFIG.rankFontSize}:text='${rankIdx + 1}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankNumX}:y=${y}`;
+      
+      // Calculate vertical offset to center scaled text
+      const yOffset = (LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2;
+      const rankTextY = y + yOffset;
+      
+      const escapedRankText = rankResult.lines[0].replace(/[':]/g, '\\$&');
+      filter += `,drawtext=${fontParam}:fontsize=${rankResult.fontSize}:text=' ${escapedRankText}':fontcolor=white:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankTextX}:y=${rankTextY}`;
     }
+    
+    // Add watermark
+    filter += `,drawtext=${fontParam}:text='${LAYOUT_CONFIG.watermarkText}':fontsize=${LAYOUT_CONFIG.watermarkFontSize}:fontcolor=white:borderw=6:bordercolor=black:x=w-text_w-${LAYOUT_CONFIG.watermarkPadding}:y=h-text_h-${LAYOUT_CONFIG.watermarkPadding}`;
 
     console.log('[addTextOverlay] Running ffmpeg command');
 
@@ -233,13 +359,13 @@ async function uploadToGCS(filePath, fileName) {
 
   await outputBucket.upload(filePath, {
     destination,
-    metadata: { cacheControl: 'public, max-age=31536000' }, // optional, good for performance
+    metadata: { cacheControl: 'public, max-age=31536000' },
   });
 
   const [signedUrl] = await outputBucket.file(destination).getSignedUrl({
     version: 'v4',
     action: 'read',
-    expires: Date.now() + 60 * 60 * 1000, // 1 hour
+    expires: Date.now() + 60 * 60 * 1000,
   });
 
   return signedUrl;
