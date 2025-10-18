@@ -108,26 +108,27 @@ functions.http('processVideos', async (req, res) => {
   const { action } = req.body;
 
   if (action === 'getUploadUrls') {
-    try {
-      const { videoCount, sessionId, fileExtensions } = req.body;
-      if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
+  try {
+    const { videoCount, sessionId, fileTypes } = req.body;
+    if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
 
-      const uploadUrls = [];
-      const filePaths = [];
-      for (let i = 0; i < videoCount; i++) {
-        const ext = fileExtensions[i] || 'mp4';
-        const fileName = `${sessionId}/video_${i}.${ext}`;
-        const [url] = await cacheBucket.file(fileName).getSignedUrl({
-          version: 'v4',
-          action: 'write',
-          expires: Date.now() + 15 * 60 * 1000,
-          contentType: 'video/mp4',
-        });
-        uploadUrls.push({ index: i, url });
-        filePaths.push(fileName);
-      }
+    const uploadUrls = [];
+    const filePaths = [];
+    for (let i = 0; i < videoCount; i++) {
+      const contentType = fileTypes?.[i] || 'video/mp4';
+      const ext = contentType.split('/')[1] || 'mp4';
+      const fileName = `${sessionId}/video_${i}.${ext}`;
+      const [url] = await cacheBucket.file(fileName).getSignedUrl({
+        version: 'v4',
+        action: 'write',
+        expires: Date.now() + 15 * 60 * 1000,
+        contentType: contentType,
+      });
+      uploadUrls.push({ index: i, url });
+      filePaths.push(fileName);
+    }
 
-      return res.json({ uploadUrls, filePaths, sessionId });
+    return res.json({ uploadUrls, filePaths, sessionId });
     } catch (error) {
       return res.status(500).json({ error: 'Failed to generate upload URLs' });
     }
@@ -171,7 +172,8 @@ functions.http('processVideos', async (req, res) => {
 async function downloadVideos(filePaths) {
   const localFiles = [];
   for (let i = 0; i < filePaths.length; i++) {
-    const localPath = `/tmp/input_${i}_${uuidv4()}.mp4`;
+    const ext = path.extname(filePaths[i]) || '.mp4';
+    const localPath = `/tmp/input_${i}_${uuidv4()}${ext}`;
     console.log(`[downloadVideos] Downloading ${filePaths[i]} to ${localPath}`);
     await cacheBucket.file(filePaths[i]).download({ destination: localPath });
     localFiles.push(localPath);
