@@ -111,13 +111,14 @@ functions.http('processVideos', async (req, res) => {
 
   if (action === 'getUploadUrls') {
     try {
-      const { videoCount, sessionId } = req.body;
+      const { videoCount, sessionId, fileExtensions } = req.body;
       if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
 
       const uploadUrls = [];
       const filePaths = [];
       for (let i = 0; i < videoCount; i++) {
-        const fileName = `${sessionId}/video_${i}.mp4`;
+        const ext = fileExtensions[i] || 'mp4';
+        const fileName = `${sessionId}/video_${i}.${ext}`;
         const [url] = await cacheBucket.file(fileName).getSignedUrl({
           version: 'v4',
           action: 'write',
