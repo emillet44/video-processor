@@ -36,8 +36,6 @@ const LAYOUT_CONFIG = {
 
 const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
 
-const { createCanvas } = require('canvas');
-
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
