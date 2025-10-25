@@ -247,13 +247,19 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
         LAYOUT_CONFIG.rankFontSize
       );
       
-      // Add rank number
-      filter += `,drawtext=${fontParam}:fontsize=${LAYOUT_CONFIG.rankFontSize}:text='${rankIdx + 1}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankNumX}:y=${y}`;
+      // Center both texts within the larger font size box
+      // The rank number stays at full size
+      const rankNumY = y;
       
-      // Calculate vertical offset to center scaled text
-      const yOffset = (LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2;
-      const rankTextY = y + yOffset;
+      // For rank text, we center it within the same vertical space as the number
+      // We need to align based on the visual center, accounting for the cap height
+      // Using a simple formula: offset by half the difference in font sizes
+      const rankTextY = y + ((LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2);
       
+      // Add rank number at full size
+      filter += `,drawtext=${fontParam}:fontsize=${LAYOUT_CONFIG.rankFontSize}:text='${rankIdx + 1}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankNumX}:y=${rankNumY}`;
+      
+      // Add rank text with vertical centering adjustment
       const escapedRankText = rankResult.lines[0].replace(/[':]/g, '\\$&');
       filter += `,drawtext=${fontParam}:fontsize=${rankResult.fontSize}:text=' ${escapedRankText}':fontcolor=white:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankTextX}:y=${rankTextY}`;
     }
@@ -297,7 +303,6 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
     });
   });
 }
-
 function concatenateVideos(inputPaths) {
   return new Promise((resolve, reject) => {
     const outputPath = `/tmp/final_${uuidv4()}.mp4`;
