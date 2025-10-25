@@ -40,8 +40,19 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
   
+  // Try to use custom font for measurements too
+  let fontFamily = 'Arial';
+  try {
+    if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
+      registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
+      fontFamily = 'CustomFont';
+    }
+  } catch (err) {
+    // Fall back to Arial
+  }
+  
   for (let fontSize = initialFontSize; fontSize >= 1; fontSize -= 2) {
-    ctx.font = `${fontSize}px Arial`;
+    ctx.font = `${fontSize}px ${fontFamily}`;
     
     const words = text.split(' ');
     const lines = [];
@@ -77,6 +88,15 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
+  // Try to register custom font if it exists
+  try {
+    if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
+      registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
+    }
+  } catch (err) {
+    console.warn('[createTextOverlayImage] Could not register custom font:', err);
+  }
+
   // Make background transparent
   ctx.clearRect(0, 0, width, height);
 
@@ -101,14 +121,18 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
                    textContentHeight + 
                    LAYOUT_CONFIG.titleBoxBottomPadding;
 
-  // Draw black box behind title
+  // Draw black box behind title - centered vertically in available space
+  const titleBoxY = LAYOUT_CONFIG.titleY;
   ctx.fillStyle = 'black';
-  ctx.fillRect(0, LAYOUT_CONFIG.titleY, width, boxHeight);
+  ctx.fillRect(0, titleBoxY, width, boxHeight);
 
-  // Draw title text lines
+  // Draw title text lines - centered within the box
   ctx.fillStyle = 'white';
-  ctx.font = `${titleResult.fontSize}px Arial`;
-  let currentY = LAYOUT_CONFIG.titleY + LAYOUT_CONFIG.titleBoxTopPadding;
+  const fontFamily = fs.existsSync(LAYOUT_CONFIG.fontPath) ? 'CustomFont' : 'Arial';
+  ctx.font = `${titleResult.fontSize}px ${fontFamily}`;
+  
+  // Calculate starting Y to center text within the box
+  let currentY = titleBoxY + ((boxHeight - textContentHeight) / 2);
   
   for (const line of titleResult.lines) {
     const textWidth = ctx.measureText(line).width;
@@ -137,7 +161,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     );
 
     // Draw rank number with black outline
-    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px Arial`;
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px ${fontFamily}`;
     const rankNumText = `${rankIdx + 1}.`;
     
     // Black outline for rank number
@@ -150,7 +174,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     ctx.fillText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
 
     // Draw rank text with proper vertical centering
-    ctx.font = `${rankResult.fontSize}px Arial`;
+    ctx.font = `${rankResult.fontSize}px ${fontFamily}`;
     
     // Calculate vertical offset to center text with rank number
     // Both use textBaseline='top', so we center based on font sizes
@@ -172,7 +196,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   }
 
   // === WATERMARK ===
-  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px Arial`;
+  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px ${fontFamily}`;
   const watermarkMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
   const watermarkX = width - watermarkMetrics.width - LAYOUT_CONFIG.watermarkPadding;
   const watermarkY = height - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding;
