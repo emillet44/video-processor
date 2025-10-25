@@ -251,10 +251,11 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
       // The rank number stays at full size
       const rankNumY = y;
       
-      // For rank text, we center it within the same vertical space as the number
-      // We need to align based on the visual center, accounting for the cap height
-      // Using a simple formula: offset by half the difference in font sizes
-      const rankTextY = y + ((LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2);
+      // For rank text, we need to account for baseline positioning in drawtext
+      // Lowercase letters have less height above baseline than capitals
+      // We add extra offset to move text down and optically center it
+      const baselineAdjustment = rankResult.fontSize * 0.15; // Approximately 15% of font size
+      const rankTextY = y + ((LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2) + baselineAdjustment;
       
       // Add rank number at full size
       filter += `,drawtext=${fontParam}:fontsize=${LAYOUT_CONFIG.rankFontSize}:text='${rankIdx + 1}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankNumX}:y=${rankNumY}`;
