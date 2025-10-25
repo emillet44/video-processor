@@ -4,7 +4,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { createCanvas } = require('canvas');
+const { createCanvas, registerFont } = require('canvas');
 
 const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
@@ -41,7 +41,7 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const ctx = canvas.getContext('2d');
   
   for (let fontSize = initialFontSize; fontSize >= 1; fontSize -= 2) {
-    ctx.font = `${fontSize}px Arial`; // Change font family as needed
+    ctx.font = `${fontSize}px Arial`;
     
     const words = text.split(' ');
     const lines = [];
@@ -69,6 +69,124 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
       return { fontSize, lines };
     }
   }
+}
+
+function createTextOverlayImage(title, ranks, ranksToShow) {
+  const width = 1080;
+  const height = 1920;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+
+  // Make background transparent
+  ctx.clearRect(0, 0, width, height);
+
+  // Set font baseline for consistent positioning
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+
+  // === TITLE SECTION ===
+  // Fit title text to box
+  const titleResult = fitTextToBox(
+    title,
+    LAYOUT_CONFIG.titleBoxWidth,
+    LAYOUT_CONFIG.titleMaxLines,
+    LAYOUT_CONFIG.titleFontSize
+  );
+
+  // Calculate title box dimensions
+  const numLines = titleResult.lines.length;
+  const textContentHeight = (numLines * titleResult.fontSize) + 
+                           ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
+  const boxHeight = LAYOUT_CONFIG.titleBoxTopPadding + 
+                   textContentHeight + 
+                   LAYOUT_CONFIG.titleBoxBottomPadding;
+
+  // Draw black box behind title
+  ctx.fillStyle = 'black';
+  ctx.fillRect(0, LAYOUT_CONFIG.titleY, width, boxHeight);
+
+  // Draw title text lines
+  ctx.fillStyle = 'white';
+  ctx.font = `${titleResult.fontSize}px Arial`;
+  let currentY = LAYOUT_CONFIG.titleY + LAYOUT_CONFIG.titleBoxTopPadding;
+  
+  for (const line of titleResult.lines) {
+    const textWidth = ctx.measureText(line).width;
+    const x = (width - textWidth) / 2; // Center horizontally
+    ctx.fillText(line, x, currentY);
+    currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+  }
+
+  // === RANK SECTION ===
+  // Show ranks progressively: first video shows last rank, second shows last 2, etc.
+  const startRankIdx = ranks.length - ranksToShow;
+  
+  for (let i = 0; i < ranksToShow; i++) {
+    const rankIdx = startRankIdx + i;
+    const y = LAYOUT_CONFIG.rankStartY + (rankIdx * LAYOUT_CONFIG.rankSpacing);
+    
+    const rankText = ranks[rankIdx];
+    const rankColor = getRankColor(rankIdx);
+    
+    // Fit rank text to box
+    const rankResult = fitTextToBox(
+      rankText,
+      LAYOUT_CONFIG.rankBoxWidth,
+      LAYOUT_CONFIG.rankMaxLines,
+      LAYOUT_CONFIG.rankFontSize
+    );
+
+    // Draw rank number with black outline
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px Arial`;
+    const rankNumText = `${rankIdx + 1}.`;
+    
+    // Black outline for rank number
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 6;
+    ctx.strokeText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
+    
+    // Rank number fill
+    ctx.fillStyle = rankColor;
+    ctx.fillText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
+
+    // Draw rank text with proper vertical centering
+    ctx.font = `${rankResult.fontSize}px Arial`;
+    
+    // Calculate vertical offset to center text with rank number
+    // Both use textBaseline='top', so we center based on font sizes
+    const rankNumHeight = LAYOUT_CONFIG.rankFontSize;
+    const rankTextHeight = rankResult.fontSize;
+    
+    // Center the smaller text within the space of the larger one
+    const verticalOffset = (rankNumHeight - rankTextHeight) / 2;
+    const rankTextY = y + verticalOffset;
+    
+    // Black outline for rank text
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 6;
+    ctx.strokeText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
+    
+    // Rank text fill
+    ctx.fillStyle = 'white';
+    ctx.fillText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
+  }
+
+  // === WATERMARK ===
+  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px Arial`;
+  const watermarkMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
+  const watermarkX = width - watermarkMetrics.width - LAYOUT_CONFIG.watermarkPadding;
+  const watermarkY = height - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding;
+  
+  // Black outline
+  ctx.strokeStyle = 'black';
+  ctx.lineWidth = 6;
+  ctx.strokeText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
+  
+  // White fill
+  ctx.fillStyle = 'white';
+  ctx.fillText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
+
+  return canvas;
 }
 
 class ProgressTracker {
@@ -108,27 +226,27 @@ functions.http('processVideos', async (req, res) => {
   const { action } = req.body;
 
   if (action === 'getUploadUrls') {
-  try {
-    const { videoCount, sessionId, fileTypes } = req.body;
-    if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
+    try {
+      const { videoCount, sessionId, fileTypes } = req.body;
+      if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
 
-    const uploadUrls = [];
-    const filePaths = [];
-    for (let i = 0; i < videoCount; i++) {
-      const contentType = fileTypes?.[i] || 'video/mp4';
-      const ext = contentType.split('/')[1] || 'mp4';
-      const fileName = `${sessionId}/video_${i}.${ext}`;
-      const [url] = await cacheBucket.file(fileName).getSignedUrl({
-        version: 'v4',
-        action: 'write',
-        expires: Date.now() + 15 * 60 * 1000,
-        contentType: contentType,
-      });
-      uploadUrls.push({ index: i, url });
-      filePaths.push(fileName);
-    }
+      const uploadUrls = [];
+      const filePaths = [];
+      for (let i = 0; i < videoCount; i++) {
+        const contentType = fileTypes?.[i] || 'video/mp4';
+        const ext = contentType.split('/')[1] || 'mp4';
+        const fileName = `${sessionId}/video_${i}.${ext}`;
+        const [url] = await cacheBucket.file(fileName).getSignedUrl({
+          version: 'v4',
+          action: 'write',
+          expires: Date.now() + 15 * 60 * 1000,
+          contentType: contentType,
+        });
+        uploadUrls.push({ index: i, url });
+        filePaths.push(fileName);
+      }
 
-    return res.json({ uploadUrls, filePaths, sessionId });
+      return res.json({ uploadUrls, filePaths, sessionId });
     } catch (error) {
       return res.status(500).json({ error: 'Failed to generate upload URLs' });
     }
@@ -184,95 +302,52 @@ async function downloadVideos(filePaths) {
 async function processVideos(files, title, ranks, videoOrder) {
   const processedVideos = [];
   const sortedFiles = videoOrder.map(idx => files[idx]).filter(Boolean);
+  const overlayPaths = [];
 
-  for (let i = 0; i < sortedFiles.length; i++) {
-    const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
-    console.log(`[processVideos] Overlaying text on video ${sortedFiles[i]}`);
-    await addTextOverlay(sortedFiles[i], outputPath, title, ranks, i + 1);
-    processedVideos.push(outputPath);
+  try {
+    // Process each video with progressively more ranks showing
+    for (let i = 0; i < sortedFiles.length; i++) {
+      const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
+      const ranksToShow = i + 1; // First video shows 1 rank, second shows 2, etc.
+      
+      console.log(`[processVideos] Creating overlay for video ${i} (showing ${ranksToShow} ranks)`);
+      
+      // Create overlay image for this video
+      const overlayCanvas = createTextOverlayImage(title, ranks, ranksToShow);
+      const overlayPath = `/tmp/overlay_${i}_${uuidv4()}.png`;
+      
+      // Save overlay as PNG
+      const buffer = overlayCanvas.toBuffer('image/png');
+      fs.writeFileSync(overlayPath, buffer);
+      overlayPaths.push(overlayPath);
+      
+      console.log(`[processVideos] Overlaying image on video ${sortedFiles[i]}`);
+      await addImageOverlay(sortedFiles[i], outputPath, overlayPath);
+      
+      processedVideos.push(outputPath);
+    }
+
+    return processedVideos;
+  } finally {
+    // Clean up overlay images
+    overlayPaths.forEach(overlayPath => {
+      try {
+        if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath);
+      } catch (err) {
+        console.error(`[processVideos] Failed to delete overlay ${overlayPath}:`, err);
+      }
+    });
   }
-
-  return processedVideos;
 }
 
-function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
+function addImageOverlay(inputPath, outputPath, overlayImagePath) {
   return new Promise((resolve, reject) => {
-    console.log('[addTextOverlay] Start');
-    
-    const fontParam = `fontfile=${LAYOUT_CONFIG.fontPath}`;
-    
-    // Start with scale and crop
-    let filter = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920';
-    
-    // Fit title text to box
-    const titleResult = fitTextToBox(
-      title,
-      LAYOUT_CONFIG.titleBoxWidth,
-      LAYOUT_CONFIG.titleMaxLines,
-      LAYOUT_CONFIG.titleFontSize
-    );
-    
-    // Calculate title box dimensions
-    const numLines = titleResult.lines.length;
-    const textContentHeight = (numLines * titleResult.fontSize) + 
-                             ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
-    const boxHeight = LAYOUT_CONFIG.titleBoxTopPadding + 
-                     textContentHeight + 
-                     LAYOUT_CONFIG.titleBoxBottomPadding;
-    
-    // Add black box behind title
-    filter += `,drawbox=y=${LAYOUT_CONFIG.titleY}:color=black:width=1080:height=${boxHeight}:t=fill`;
-    
-    // Add title text lines
-    let currentY = LAYOUT_CONFIG.titleY + LAYOUT_CONFIG.titleBoxTopPadding;
-    for (const line of titleResult.lines) {
-      const escapedLine = line.replace(/[':]/g, '\\$&');
-      filter += `,drawtext=${fontParam}:fontsize=${titleResult.fontSize}:text='${escapedLine}':fontcolor=white:x=(w-text_w)/2:y=${currentY}`;
-      currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
-    }
-    
-    // Add rank overlays
-    for (let i = 0; i < ranksToShow; i++) {
-      const rankIdx = ranks.length - ranksToShow + i;
-      const y = LAYOUT_CONFIG.rankStartY + (rankIdx * LAYOUT_CONFIG.rankSpacing);
-      
-      const rankText = ranks[rankIdx];
-      const rankColor = getRankColor(rankIdx);
-      
-      // Fit rank text to box
-      const rankResult = fitTextToBox(
-        rankText,
-        LAYOUT_CONFIG.rankBoxWidth,
-        LAYOUT_CONFIG.rankMaxLines,
-        LAYOUT_CONFIG.rankFontSize
-      );
-      
-      // Center both texts within the larger font size box
-      // The rank number stays at full size
-      const rankNumY = y;
-      
-      // For rank text, we need to account for baseline positioning in drawtext
-      // Lowercase letters have less height above baseline than capitals
-      // We add extra offset to move text down and optically center it
-      const baselineAdjustment = rankResult.fontSize * 0.15; // Approximately 15% of font size
-      const rankTextY = y + ((LAYOUT_CONFIG.rankFontSize - rankResult.fontSize) / 2) + baselineAdjustment;
-      
-      // Add rank number at full size
-      filter += `,drawtext=${fontParam}:fontsize=${LAYOUT_CONFIG.rankFontSize}:text='${rankIdx + 1}.':fontcolor=${rankColor}:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankNumX}:y=${rankNumY}`;
-      
-      // Add rank text with vertical centering adjustment
-      const escapedRankText = rankResult.lines[0].replace(/[':]/g, '\\$&');
-      filter += `,drawtext=${fontParam}:fontsize=${rankResult.fontSize}:text=' ${escapedRankText}':fontcolor=white:box=0:borderw=6:bordercolor=black:x=${LAYOUT_CONFIG.rankTextX}:y=${rankTextY}`;
-    }
-    
-    // Add watermark
-    filter += `,drawtext=${fontParam}:text='${LAYOUT_CONFIG.watermarkText}':fontsize=${LAYOUT_CONFIG.watermarkFontSize}:fontcolor=white:borderw=6:bordercolor=black:x=w-text_w-${LAYOUT_CONFIG.watermarkPadding}:y=h-text_h-${LAYOUT_CONFIG.watermarkPadding}`;
-
-    console.log('[addTextOverlay] Running ffmpeg command');
+    console.log('[addImageOverlay] Start');
 
     const ffmpeg = spawn('ffmpeg', [
       '-i', inputPath,
-      '-vf', filter,
+      '-i', overlayImagePath,
+      '-filter_complex', '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0',
       '-c:v', 'libx264',
       '-c:a', 'aac',
       '-preset', 'ultrafast',
@@ -304,6 +379,7 @@ function addTextOverlay(inputPath, outputPath, title, ranks, ranksToShow) {
     });
   });
 }
+
 function concatenateVideos(inputPaths) {
   return new Promise((resolve, reject) => {
     const outputPath = `/tmp/final_${uuidv4()}.mp4`;
@@ -365,7 +441,7 @@ async function cleanup(sessionId, localFiles = []) {
   });
 
   try {
-    const tempFiles = fs.readdirSync('/tmp').filter(f => f.includes('input_') || f.includes('processed_') || f.includes('final_'));
+    const tempFiles = fs.readdirSync('/tmp').filter(f => f.includes('input_') || f.includes('processed_') || f.includes('final_') || f.includes('overlay_'));
     tempFiles.forEach(f => {
       try { fs.unlinkSync(`/tmp/${f}`); } catch { }
     });
