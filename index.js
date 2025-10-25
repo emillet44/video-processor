@@ -31,28 +31,24 @@ const LAYOUT_CONFIG = {
   watermarkFontSize: 48,
   watermarkAlpha: '0.7',
   watermarkPadding: 20,
-  fontPath: '/usr/share/fonts/truetype/font.ttf'
+  fontPath: '/usr/share/fonts/truetype/font.ttf',
+  textOutlineWidth: 12
 };
 
 const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
+
+// Register font once at module level
+if (!fs.existsSync(LAYOUT_CONFIG.fontPath)) {
+  throw new Error(`Font file not found at ${LAYOUT_CONFIG.fontPath}`);
+}
+registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
   
-  // Try to use custom font for measurements too
-  let fontFamily = 'Arial';
-  try {
-    if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
-      registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
-      fontFamily = 'CustomFont';
-    }
-  } catch (err) {
-    // Fall back to Arial
-  }
-  
   for (let fontSize = initialFontSize; fontSize >= 1; fontSize -= 2) {
-    ctx.font = `${fontSize}px ${fontFamily}`;
+    ctx.font = `${fontSize}px CustomFont`;
     
     const words = text.split(' ');
     const lines = [];
@@ -88,15 +84,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Try to register custom font if it exists
-  try {
-    if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
-      registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
-    }
-  } catch (err) {
-    console.warn('[createTextOverlayImage] Could not register custom font:', err);
-  }
-
   // Make background transparent
   ctx.clearRect(0, 0, width, height);
 
@@ -128,8 +115,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
 
   // Draw title text lines - centered within the box
   ctx.fillStyle = 'white';
-  const fontFamily = fs.existsSync(LAYOUT_CONFIG.fontPath) ? 'CustomFont' : 'Arial';
-  ctx.font = `${titleResult.fontSize}px ${fontFamily}`;
+  ctx.font = `${titleResult.fontSize}px CustomFont`;
   
   // Calculate starting Y to center text within the box
   let currentY = titleBoxY + ((boxHeight - textContentHeight) / 2);
@@ -161,12 +147,12 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     );
 
     // Draw rank number with black outline
-    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px ${fontFamily}`;
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px CustomFont`;
     const rankNumText = `${rankIdx + 1}.`;
     
     // Black outline for rank number
     ctx.strokeStyle = 'black';
-    ctx.lineWidth = 6;
+    ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
     ctx.strokeText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
     
     // Rank number fill
@@ -174,7 +160,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     ctx.fillText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
 
     // Draw rank text with proper vertical centering
-    ctx.font = `${rankResult.fontSize}px ${fontFamily}`;
+    ctx.font = `${rankResult.fontSize}px CustomFont`;
     
     // Calculate vertical offset to center text with rank number
     // Both use textBaseline='top', so we center based on font sizes
@@ -187,7 +173,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     
     // Black outline for rank text
     ctx.strokeStyle = 'black';
-    ctx.lineWidth = 6;
+    ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
     ctx.strokeText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
     
     // Rank text fill
@@ -196,14 +182,14 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   }
 
   // === WATERMARK ===
-  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px ${fontFamily}`;
+  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px CustomFont`;
   const watermarkMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
   const watermarkX = width - watermarkMetrics.width - LAYOUT_CONFIG.watermarkPadding;
   const watermarkY = height - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding;
   
   // Black outline
   ctx.strokeStyle = 'black';
-  ctx.lineWidth = 6;
+  ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
   ctx.strokeText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
   
   // White fill
