@@ -12,15 +12,15 @@ const outputBucket = storage.bucket('ranktop-v');
 
 // Layout configuration - centralized for easy updates
 const LAYOUT_CONFIG = {
-  titleFontSize: 140,
+  titleFontSize: 100,
   titleY: 0,
-  titleBoxTopPadding: 50,
+  titleBoxTopPadding: 30,
   titleBoxBottomPadding: 30,
-  titleLineSpacing: 10,
+  titleLineSpacing: 60,
   titleBoxWidth: 980,
   titleMaxLines: 2,
   rankFontSize: 60,
-  rankStartY: 290,
+  rankPaddingY: 20,
   rankSpacing: 140,
   rankNumX: 45,
   rankTextX: 125,
@@ -133,7 +133,7 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   
   for (let i = 0; i < ranksToShow; i++) {
     const rankIdx = startRankIdx + i;
-    const y = LAYOUT_CONFIG.rankStartY + (rankIdx * LAYOUT_CONFIG.rankSpacing);
+    const y = LAYOUT_CONFIG.rankPaddingY + boxHeight + (rankIdx * LAYOUT_CONFIG.rankSpacing);
     
     const rankText = ranks[rankIdx];
     const rankColor = getRankColor(rankIdx);
