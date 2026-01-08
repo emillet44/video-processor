@@ -22,7 +22,7 @@ const QUALITY_PRESETS = {
   final: {
     scale: '1080:1920',
     outputScale: null, // Full 1080x1920
-    preset: 'medium', // Better quality
+    preset: 'ultrafast',
     crf: '23',
     path: 'posts'
   }
