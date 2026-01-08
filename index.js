@@ -265,7 +265,7 @@ functions.http('processVideos', async (req, res) => {
   const tracker = new ProgressTracker(res);
 
   try {
-    const { sessionId, title, ranks, videoOrder, filePaths, quality = 'preview', postId } = req.body;
+    const { sessionId, title, ranks, filePaths, quality = 'preview', postId } = req.body;
     if (!sessionId || !title || !ranks || !filePaths) throw new Error('Missing required data');
     
     // Validate quality parameter
@@ -280,13 +280,12 @@ functions.http('processVideos', async (req, res) => {
     console.log(`[processVideos] Start - Quality: ${quality}, PostId: ${postId || 'N/A'}`);
 
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
-    const parsedVideoOrder = typeof videoOrder === 'string' ? JSON.parse(videoOrder) : videoOrder;
 
     tracker.update('Downloading videos from storage...', 10);
     const localFiles = await downloadVideos(filePaths);
 
     tracker.update(`Processing videos with overlays (${quality})...`, 30);
-    const processedVideos = await processVideosWithOverlay(localFiles, title, parsedRanks, parsedVideoOrder, qualityPreset);
+    const processedVideos = await processVideosWithOverlay(localFiles, title, parsedRanks, qualityPreset);
 
     tracker.update('Stitching videos together...', 70);
     const finalVideo = await concatenateVideos(processedVideos);
@@ -330,13 +329,12 @@ async function downloadVideos(filePaths) {
   return localFiles;
 }
 
-async function processVideosWithOverlay(files, title, ranks, videoOrder, qualityPreset) {
+async function processVideosWithOverlay(files, title, ranks, qualityPreset) {
   const processedVideos = [];
-  const sortedFiles = videoOrder.map(idx => files[idx]).filter(Boolean);
   const overlayPaths = [];
 
   try {
-    for (let i = 0; i < sortedFiles.length; i++) {
+    for (let i = 0; i < files.length; i++) {
       const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
       const ranksToShow = i + 1;
       
@@ -349,8 +347,8 @@ async function processVideosWithOverlay(files, title, ranks, videoOrder, quality
       fs.writeFileSync(overlayPath, buffer);
       overlayPaths.push(overlayPath);
       
-      console.log(`[processVideos] Overlaying image on video ${sortedFiles[i]} with quality preset`);
-      await addImageOverlay(sortedFiles[i], outputPath, overlayPath, qualityPreset);
+      console.log(`[processVideos] Overlaying image on video ${files[i]} with quality preset`);
+      await addImageOverlay(files[i], outputPath, overlayPath, qualityPreset);
       
       processedVideos.push(outputPath);
     }
