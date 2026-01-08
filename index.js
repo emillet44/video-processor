@@ -10,6 +10,24 @@ const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
 const outputBucket = storage.bucket('ranktop-v');
 
+// Quality presets
+const QUALITY_PRESETS = {
+  preview: {
+    scale: '1080:1920',
+    outputScale: 'scale=720:1280', // 720p output
+    preset: 'ultrafast',
+    crf: '28', // Lower quality for faster encoding
+    path: 'previews'
+  },
+  final: {
+    scale: '1080:1920',
+    outputScale: null, // Full 1080x1920
+    preset: 'medium', // Better quality
+    crf: '23',
+    path: 'posts'
+  }
+};
+
 // Layout configuration - centralized for easy updates
 const LAYOUT_CONFIG = {
   titleFontSize: 100,
@@ -92,7 +110,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   ctx.textAlign = 'left';
 
   // === TITLE SECTION ===
-  // Fit title text to box
   const titleResult = fitTextToBox(
     title,
     LAYOUT_CONFIG.titleBoxWidth,
@@ -100,7 +117,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     LAYOUT_CONFIG.titleFontSize
   );
 
-  // Calculate title box dimensions
   const numLines = titleResult.lines.length;
   const textContentHeight = (numLines * titleResult.fontSize) + 
                            ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
@@ -108,27 +124,23 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
                    textContentHeight + 
                    LAYOUT_CONFIG.titleBoxBottomPadding;
 
-  // Draw black box behind title - centered vertically in available space
   const titleBoxY = LAYOUT_CONFIG.titleY;
   ctx.fillStyle = 'black';
   ctx.fillRect(0, titleBoxY, width, boxHeight);
 
-  // Draw title text lines - centered within the box
   ctx.fillStyle = 'white';
   ctx.font = `${titleResult.fontSize}px CustomFont`;
   
-  // Calculate starting Y to center text within the box
   let currentY = titleBoxY + ((boxHeight - textContentHeight) / 2);
   
   for (const line of titleResult.lines) {
     const textWidth = ctx.measureText(line).width;
-    const x = (width - textWidth) / 2; // Center horizontally
+    const x = (width - textWidth) / 2;
     ctx.fillText(line, x, currentY);
     currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
   }
 
   // === RANK SECTION ===
-  // Show ranks progressively: first video shows last rank, second shows last 2, etc.
   const startRankIdx = ranks.length - ranksToShow;
   
   for (let i = 0; i < ranksToShow; i++) {
@@ -138,7 +150,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     const rankText = ranks[rankIdx];
     const rankColor = getRankColor(rankIdx);
     
-    // Fit rank text to box
     const rankResult = fitTextToBox(
       rankText,
       LAYOUT_CONFIG.rankBoxWidth,
@@ -146,37 +157,27 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
       LAYOUT_CONFIG.rankFontSize
     );
 
-    // Draw rank number with black outline
     ctx.font = `${LAYOUT_CONFIG.rankFontSize}px CustomFont`;
     const rankNumText = `${rankIdx + 1}.`;
     
-    // Black outline for rank number
     ctx.strokeStyle = 'black';
     ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
     ctx.strokeText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
     
-    // Rank number fill
     ctx.fillStyle = rankColor;
     ctx.fillText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
 
-    // Draw rank text with proper vertical centering
     ctx.font = `${rankResult.fontSize}px CustomFont`;
     
-    // Calculate vertical offset to center text with rank number
-    // Both use textBaseline='top', so we center based on font sizes
     const rankNumHeight = LAYOUT_CONFIG.rankFontSize;
     const rankTextHeight = rankResult.fontSize;
-    
-    // Center the smaller text within the space of the larger one
     const verticalOffset = (rankNumHeight - rankTextHeight) / 2;
     const rankTextY = y + verticalOffset;
     
-    // Black outline for rank text
     ctx.strokeStyle = 'black';
     ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
     ctx.strokeText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
     
-    // Rank text fill
     ctx.fillStyle = 'white';
     ctx.fillText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
   }
@@ -187,12 +188,10 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   const watermarkX = width - watermarkMetrics.width - LAYOUT_CONFIG.watermarkPadding;
   const watermarkY = height - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding;
   
-  // Black outline
   ctx.strokeStyle = 'black';
   ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
   ctx.strokeText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
   
-  // White fill
   ctx.fillStyle = 'white';
   ctx.fillText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
 
@@ -266,10 +265,19 @@ functions.http('processVideos', async (req, res) => {
   const tracker = new ProgressTracker(res);
 
   try {
-    const { sessionId, title, ranks, videoOrder, filePaths } = req.body;
+    const { sessionId, title, ranks, videoOrder, filePaths, quality = 'preview', postId } = req.body;
     if (!sessionId || !title || !ranks || !filePaths) throw new Error('Missing required data');
+    
+    // Validate quality parameter
+    const qualityPreset = QUALITY_PRESETS[quality];
+    if (!qualityPreset) throw new Error(`Invalid quality: ${quality}`);
 
-    console.log('[processVideos] Start', req.body);
+    // IMPORTANT: For final quality, postId is REQUIRED
+    if (quality === 'final' && !postId) {
+      throw new Error('postId is required for final quality videos');
+    }
+
+    console.log(`[processVideos] Start - Quality: ${quality}, PostId: ${postId || 'N/A'}`);
 
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedVideoOrder = typeof videoOrder === 'string' ? JSON.parse(videoOrder) : videoOrder;
@@ -277,14 +285,27 @@ functions.http('processVideos', async (req, res) => {
     tracker.update('Downloading videos from storage...', 10);
     const localFiles = await downloadVideos(filePaths);
 
-    tracker.update('Processing videos with overlays...', 30);
-    const processedVideos = await processVideos(localFiles, title, parsedRanks, parsedVideoOrder);
+    tracker.update(`Processing videos with overlays (${quality})...`, 30);
+    const processedVideos = await processVideosWithOverlay(localFiles, title, parsedRanks, parsedVideoOrder, qualityPreset);
 
     tracker.update('Stitching videos together...', 70);
     const finalVideo = await concatenateVideos(processedVideos);
 
     tracker.update('Uploading final video...', 90);
-    const publicUrl = await uploadToGCS(finalVideo, `${title.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.mp4`);
+    
+    // Determine filename and path based on quality
+    let fileName;
+    let subPath;
+    
+    if (quality === 'preview') {
+      fileName = `${sessionId}.mp4`;
+      subPath = 'previews';
+    } else if (quality === 'final') {
+      fileName = `${postId}.mp4`;
+      subPath = 'posts';
+    }
+    
+    const publicUrl = await uploadToGCS(finalVideo, fileName, subPath);
 
     tracker.update('Cleaning up...', 95);
     await cleanup(sessionId, [...localFiles, ...processedVideos, finalVideo]);
@@ -309,37 +330,33 @@ async function downloadVideos(filePaths) {
   return localFiles;
 }
 
-async function processVideos(files, title, ranks, videoOrder) {
+async function processVideosWithOverlay(files, title, ranks, videoOrder, qualityPreset) {
   const processedVideos = [];
   const sortedFiles = videoOrder.map(idx => files[idx]).filter(Boolean);
   const overlayPaths = [];
 
   try {
-    // Process each video with progressively more ranks showing
     for (let i = 0; i < sortedFiles.length; i++) {
       const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
-      const ranksToShow = i + 1; // First video shows 1 rank, second shows 2, etc.
+      const ranksToShow = i + 1;
       
       console.log(`[processVideos] Creating overlay for video ${i} (showing ${ranksToShow} ranks)`);
       
-      // Create overlay image for this video
       const overlayCanvas = createTextOverlayImage(title, ranks, ranksToShow);
       const overlayPath = `/tmp/overlay_${i}_${uuidv4()}.png`;
       
-      // Save overlay as PNG
       const buffer = overlayCanvas.toBuffer('image/png');
       fs.writeFileSync(overlayPath, buffer);
       overlayPaths.push(overlayPath);
       
-      console.log(`[processVideos] Overlaying image on video ${sortedFiles[i]}`);
-      await addImageOverlay(sortedFiles[i], outputPath, overlayPath);
+      console.log(`[processVideos] Overlaying image on video ${sortedFiles[i]} with quality preset`);
+      await addImageOverlay(sortedFiles[i], outputPath, overlayPath, qualityPreset);
       
       processedVideos.push(outputPath);
     }
 
     return processedVideos;
   } finally {
-    // Clean up overlay images
     overlayPaths.forEach(overlayPath => {
       try {
         if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath);
@@ -350,18 +367,28 @@ async function processVideos(files, title, ranks, videoOrder) {
   }
 }
 
-function addImageOverlay(inputPath, outputPath, overlayImagePath) {
+function addImageOverlay(inputPath, outputPath, overlayImagePath, qualityPreset) {
   return new Promise((resolve, reject) => {
-    console.log('[addImageOverlay] Start');
+    console.log(`[addImageOverlay] Start with preset: ${JSON.stringify(qualityPreset)}`);
+
+    // Build filter_complex based on quality preset
+    let filterComplex;
+    if (qualityPreset.outputScale) {
+      // Preview: scale down to 720p
+      filterComplex = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0[scaled];[scaled]${qualityPreset.outputScale}`;
+    } else {
+      // Final: keep full resolution
+      filterComplex = '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0';
+    }
 
     const ffmpeg = spawn('ffmpeg', [
       '-i', inputPath,
       '-i', overlayImagePath,
-      '-filter_complex', '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0',
+      '-filter_complex', filterComplex,
       '-c:v', 'libx264',
       '-c:a', 'aac',
-      '-preset', 'ultrafast',
-      '-crf', '23',
+      '-preset', qualityPreset.preset,
+      '-crf', qualityPreset.crf,
       '-movflags', '+faststart',
       '-y', outputPath,
     ]);
@@ -426,8 +453,8 @@ function concatenateVideos(inputPaths) {
   });
 }
 
-async function uploadToGCS(filePath, fileName) {
-  const destination = `processed/${fileName}`;
+async function uploadToGCS(filePath, fileName, subPath = 'posts') {
+  const destination = `${subPath}/${fileName}`;
 
   await outputBucket.upload(filePath, {
     destination,
