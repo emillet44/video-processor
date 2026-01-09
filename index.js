@@ -10,25 +10,23 @@ const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
 const outputBucket = storage.bucket('ranktop-v');
 
-// Quality presets
 const QUALITY_PRESETS = {
   preview: {
-    scale: '1080:1920',
-    outputScale: 'scale=720:1280', // 720p output
+    targetW: 720,
+    targetH: 1280,
     preset: 'ultrafast',
-    crf: '28', // Lower quality for faster encoding
+    crf: '28',
     path: 'previews'
   },
   final: {
-    scale: '1080:1920',
-    outputScale: null, // Full 1080x1920
+    targetW: 1080,
+    targetH: 1920,
     preset: 'ultrafast',
     crf: '23',
     path: 'posts'
   }
 };
 
-// Layout configuration - centralized for easy updates
 const LAYOUT_CONFIG = {
   titleFontSize: 100,
   titleY: 0,
@@ -55,7 +53,6 @@ const LAYOUT_CONFIG = {
 
 const getRankColor = (idx) => LAYOUT_CONFIG.rankColors[idx] || 'white';
 
-// Register font once at module level
 if (!fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   throw new Error(`Font file not found at ${LAYOUT_CONFIG.fontPath}`);
 }
@@ -64,167 +61,83 @@ registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
-  
   for (let fontSize = initialFontSize; fontSize >= 1; fontSize -= 2) {
     ctx.font = `${fontSize}px CustomFont`;
-    
     const words = text.split(' ');
     const lines = [];
     let currentLine = '';
-    
     for (const word of words) {
       const testLine = currentLine ? `${currentLine} ${word}` : word;
-      const metrics = ctx.measureText(testLine);
-      
-      if (metrics.width <= boxWidth) {
+      if (ctx.measureText(testLine).width <= boxWidth) {
         currentLine = testLine;
       } else {
-        if (currentLine) {
-          lines.push(currentLine);
-          currentLine = word;
-        } else {
-          lines.push(word);
-          currentLine = '';
-        }
+        if (currentLine) { lines.push(currentLine); currentLine = word; }
+        else { lines.push(word); currentLine = ''; }
       }
     }
     if (currentLine) lines.push(currentLine);
-    
-    if (lines.length <= maxLines) {
-      return { fontSize, lines };
-    }
+    if (lines.length <= maxLines) return { fontSize, lines };
   }
 }
 
-function createTextOverlayImage(title, ranks, ranksToShow) {
-  const width = 1080;
-  const height = 1920;
-  const canvas = createCanvas(width, height);
+function createTextOverlayImage(title, ranks, ranksToShow, targetW, targetH) {
+  const canvas = createCanvas(targetW, targetH);
   const ctx = canvas.getContext('2d');
-
-  // Make background transparent
-  ctx.clearRect(0, 0, width, height);
-
-  // Set font baseline for consistent positioning
+  ctx.clearRect(0, 0, targetW, targetH);
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
 
-  // === TITLE SECTION ===
-  const titleResult = fitTextToBox(
-    title,
-    LAYOUT_CONFIG.titleBoxWidth,
-    LAYOUT_CONFIG.titleMaxLines,
-    LAYOUT_CONFIG.titleFontSize
-  );
+  // Scale factor if we are doing 720p preview
+  const scale = targetW / 1080;
 
+  const titleResult = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth * scale, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize * scale);
   const numLines = titleResult.lines.length;
-  const textContentHeight = (numLines * titleResult.fontSize) + 
-                           ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
-  const boxHeight = LAYOUT_CONFIG.titleBoxTopPadding + 
-                   textContentHeight + 
-                   LAYOUT_CONFIG.titleBoxBottomPadding;
+  const textContentHeight = (numLines * titleResult.fontSize) + ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing * scale);
+  const boxHeight = (LAYOUT_CONFIG.titleBoxTopPadding + LAYOUT_CONFIG.titleBoxBottomPadding) * scale + textContentHeight;
 
-  const titleBoxY = LAYOUT_CONFIG.titleY;
   ctx.fillStyle = 'black';
-  ctx.fillRect(0, titleBoxY, width, boxHeight);
-
+  ctx.fillRect(0, 0, targetW, boxHeight);
   ctx.fillStyle = 'white';
   ctx.font = `${titleResult.fontSize}px CustomFont`;
-  
-  let currentY = titleBoxY + ((boxHeight - textContentHeight) / 2);
-  
+  let currentY = (boxHeight - textContentHeight) / 2;
   for (const line of titleResult.lines) {
-    const textWidth = ctx.measureText(line).width;
-    const x = (width - textWidth) / 2;
+    const x = (targetW - ctx.measureText(line).width) / 2;
     ctx.fillText(line, x, currentY);
-    currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+    currentY += titleResult.fontSize + (LAYOUT_CONFIG.titleLineSpacing * scale);
   }
 
-  // === RANK SECTION ===
   const startRankIdx = ranks.length - ranksToShow;
-  
   for (let i = 0; i < ranksToShow; i++) {
     const rankIdx = startRankIdx + i;
-    const y = LAYOUT_CONFIG.rankPaddingY + boxHeight + (rankIdx * LAYOUT_CONFIG.rankSpacing);
-    
-    const rankText = ranks[rankIdx];
-    const rankColor = getRankColor(rankIdx);
-    
-    const rankResult = fitTextToBox(
-      rankText,
-      LAYOUT_CONFIG.rankBoxWidth,
-      LAYOUT_CONFIG.rankMaxLines,
-      LAYOUT_CONFIG.rankFontSize
-    );
+    const y = (LAYOUT_CONFIG.rankPaddingY * scale) + boxHeight + (rankIdx * LAYOUT_CONFIG.rankSpacing * scale);
+    const rankResult = fitTextToBox(ranks[rankIdx], LAYOUT_CONFIG.rankBoxWidth * scale, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize * scale);
 
-    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px CustomFont`;
-    const rankNumText = `${rankIdx + 1}.`;
-    
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize * scale}px CustomFont`;
+    const numText = `${rankIdx + 1}.`;
     ctx.strokeStyle = 'black';
-    ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-    ctx.strokeText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
-    
-    ctx.fillStyle = rankColor;
-    ctx.fillText(rankNumText, LAYOUT_CONFIG.rankNumX, y);
+    ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth * scale;
+    ctx.strokeText(numText, LAYOUT_CONFIG.rankNumX * scale, y);
+    ctx.fillStyle = getRankColor(rankIdx);
+    ctx.fillText(numText, LAYOUT_CONFIG.rankNumX * scale, y);
 
     ctx.font = `${rankResult.fontSize}px CustomFont`;
-    
-    const rankNumHeight = LAYOUT_CONFIG.rankFontSize;
-    const rankTextHeight = rankResult.fontSize;
-    const verticalOffset = (rankNumHeight - rankTextHeight) / 2;
-    const rankTextY = y + verticalOffset;
-    
-    ctx.strokeStyle = 'black';
-    ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-    ctx.strokeText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
-    
+    const rankTextY = y + ((LAYOUT_CONFIG.rankFontSize * scale - rankResult.fontSize) / 2);
+    ctx.strokeText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX * scale, rankTextY);
     ctx.fillStyle = 'white';
-    ctx.fillText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
+    ctx.fillText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX * scale, rankTextY);
   }
 
-  // === WATERMARK ===
-  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px CustomFont`;
-  const watermarkMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
-  const watermarkX = width - watermarkMetrics.width - LAYOUT_CONFIG.watermarkPadding;
-  const watermarkY = height - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding;
-  
+  ctx.font = `${LAYOUT_CONFIG.watermarkFontSize * scale}px CustomFont`;
+  const wmMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
+  const wmX = targetW - wmMetrics.width - (LAYOUT_CONFIG.watermarkPadding * scale);
+  const wmY = targetH - (LAYOUT_CONFIG.watermarkFontSize * scale) - (LAYOUT_CONFIG.watermarkPadding * scale);
   ctx.strokeStyle = 'black';
-  ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-  ctx.strokeText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
-  
+  ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth * scale;
+  ctx.strokeText(LAYOUT_CONFIG.watermarkText, wmX, wmY);
   ctx.fillStyle = 'white';
-  ctx.fillText(LAYOUT_CONFIG.watermarkText, watermarkX, watermarkY);
+  ctx.fillText(LAYOUT_CONFIG.watermarkText, wmX, wmY);
 
   return canvas;
-}
-
-class ProgressTracker {
-  constructor(res) {
-    this.res = res;
-    this.totalSteps = 6;
-    this.currentStep = 0;
-  }
-
-  update(message, progress = null) {
-    this.currentStep++;
-    const calculatedProgress = progress ?? Math.round((this.currentStep / this.totalSteps) * 100);
-    const data = { step: this.currentStep, totalSteps: this.totalSteps, progress: calculatedProgress, message, timestamp: Date.now() };
-    this.res.write(`data: ${JSON.stringify(data)}\n\n`);
-    this.res.flush?.();
-  }
-
-  complete(videoUrl) {
-    const data = { step: this.totalSteps, totalSteps: this.totalSteps, progress: 100, message: 'Complete!', videoUrl, complete: true, timestamp: Date.now() };
-    this.res.write(`data: ${JSON.stringify(data)}\n\n`);
-    this.res.flush?.();
-    this.res.end();
-  }
-
-  error(errorMessage) {
-    this.res.write(`data: ${JSON.stringify({ error: errorMessage, timestamp: Date.now() })}\n\n`);
-    this.res.flush?.();
-    this.res.end();
-  }
 }
 
 functions.http('processVideos', async (req, res) => {
@@ -233,32 +146,20 @@ functions.http('processVideos', async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { action } = req.body;
-
   if (action === 'getUploadUrls') {
     try {
       const { videoCount, sessionId, fileTypes } = req.body;
-      if (!videoCount || !sessionId) return res.status(400).json({ error: 'Missing videoCount or sessionId' });
-
       const uploadUrls = [];
       const filePaths = [];
       for (let i = 0; i < videoCount; i++) {
         const contentType = fileTypes?.[i] || 'video/mp4';
-        const ext = contentType.split('/')[1] || 'mp4';
-        const fileName = `${sessionId}/video_${i}.${ext}`;
-        const [url] = await cacheBucket.file(fileName).getSignedUrl({
-          version: 'v4',
-          action: 'write',
-          expires: Date.now() + 15 * 60 * 1000,
-          contentType: contentType,
-        });
+        const fileName = `${sessionId}/video_${i}.${contentType.split('/')[1] || 'mp4'}`;
+        const [url] = await cacheBucket.file(fileName).getSignedUrl({ version: 'v4', action: 'write', expires: Date.now() + 15 * 60 * 1000, contentType });
         uploadUrls.push({ index: i, url });
         filePaths.push(fileName);
       }
-
       return res.json({ uploadUrls, filePaths, sessionId });
-    } catch (error) {
-      return res.status(500).json({ error: 'Failed to generate upload URLs' });
-    }
+    } catch (error) { return res.status(500).json({ error: 'Upload URL failed' }); }
   }
 
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -266,226 +167,97 @@ functions.http('processVideos', async (req, res) => {
 
   try {
     const { sessionId, title, ranks, filePaths, quality = 'preview', postId } = req.body;
-    if (!sessionId || !title || !ranks || !filePaths) throw new Error('Missing required data');
-    
-    // Validate quality parameter
-    const qualityPreset = QUALITY_PRESETS[quality];
-    if (!qualityPreset) throw new Error(`Invalid quality: ${quality}`);
-
-    // IMPORTANT: For final quality, postId is REQUIRED
-    if (quality === 'final' && !postId) {
-      throw new Error('postId is required for final quality videos');
-    }
-
-    console.log(`[processVideos] Start - Quality: ${quality}, PostId: ${postId || 'N/A'}`);
+    const preset = QUALITY_PRESETS[quality];
+    if (!preset) throw new Error('Invalid quality');
+    if (quality === 'final' && !postId) throw new Error('postId missing');
 
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
-
-    tracker.update('Downloading videos from storage...', 10);
+    tracker.update('Downloading fragments...', 15);
     const localFiles = await downloadVideos(filePaths);
 
-    tracker.update(`Processing videos with overlays (${quality})...`, 30);
-    const processedVideos = await processVideosWithOverlay(localFiles, title, parsedRanks, qualityPreset);
+    tracker.update(`Parallel Processing (${quality})...`, 40);
+    const processedVideos = await processVideosParallel(localFiles, title, parsedRanks, preset);
 
-    tracker.update('Stitching videos together...', 70);
-    const finalVideo = await concatenateVideos(processedVideos);
+    tracker.update('Assembling final video...', 80);
+    const finalPath = await concatenateVideos(processedVideos);
 
-    tracker.update('Uploading final video...', 90);
-    
-    // Determine filename and path based on quality
-    let fileName;
-    let subPath;
-    
-    if (quality === 'preview') {
-      fileName = `${sessionId}.mp4`;
-      subPath = 'previews';
-    } else if (quality === 'final') {
-      fileName = `${postId}.mp4`;
-      subPath = 'posts';
-    }
-    
-    const publicUrl = await uploadToGCS(finalVideo, fileName, subPath);
+    const destName = quality === 'preview' ? `${sessionId}.mp4` : `${postId}.mp4`;
+    const finalUrl = await uploadToGCS(finalPath, destName, preset.path);
 
-    tracker.update('Cleaning up...', 95);
-    await cleanup(sessionId, [...localFiles, ...processedVideos, finalVideo]);
-
-    tracker.complete(publicUrl);
+    tracker.update('Finalizing...', 95);
+    await cleanup(sessionId, [...localFiles, ...processedVideos, finalPath]);
+    tracker.complete(finalUrl);
   } catch (error) {
-    console.error('[processVideos] Error:', error);
     tracker.error(error.message);
-    await cleanup(req.body.sessionId || 'unknown').catch(() => { });
+    await cleanup(req.body.sessionId).catch(() => {});
   }
 });
 
 async function downloadVideos(filePaths) {
-  const localFiles = [];
-  for (let i = 0; i < filePaths.length; i++) {
-    const ext = path.extname(filePaths[i]) || '.mp4';
-    const localPath = `/tmp/input_${i}_${uuidv4()}${ext}`;
-    console.log(`[downloadVideos] Downloading ${filePaths[i]} to ${localPath}`);
-    await cacheBucket.file(filePaths[i]).download({ destination: localPath });
-    localFiles.push(localPath);
-  }
-  return localFiles;
+  return Promise.all(filePaths.map(async (fp, i) => {
+    const local = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
+    await cacheBucket.file(fp).download({ destination: local });
+    return local;
+  }));
 }
 
-async function processVideosWithOverlay(files, title, ranks, qualityPreset) {
-  const processedVideos = [];
-  const overlayPaths = [];
+async function processVideosParallel(files, title, ranks, preset) {
+  return Promise.all(files.map(async (file, i) => {
+    const out = `/tmp/proc_${i}_${uuidv4()}.mp4`;
+    const canvas = createTextOverlayImage(title, ranks, i + 1, preset.targetW, preset.targetH);
+    const ovPath = `/tmp/ov_${i}_${uuidv4()}.png`;
+    fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
 
-  try {
-    for (let i = 0; i < files.length; i++) {
-      const outputPath = `/tmp/processed_${i}_${uuidv4()}.mp4`;
-      const ranksToShow = i + 1;
-      
-      console.log(`[processVideos] Creating overlay for video ${i} (showing ${ranksToShow} ranks)`);
-      
-      const overlayCanvas = createTextOverlayImage(title, ranks, ranksToShow);
-      const overlayPath = `/tmp/overlay_${i}_${uuidv4()}.png`;
-      
-      const buffer = overlayCanvas.toBuffer('image/png');
-      fs.writeFileSync(overlayPath, buffer);
-      overlayPaths.push(overlayPath);
-      
-      console.log(`[processVideos] Overlaying image on video ${files[i]} with quality preset`);
-      await addImageOverlay(files[i], outputPath, overlayPath, qualityPreset);
-      
-      processedVideos.push(outputPath);
-    }
-
-    return processedVideos;
-  } finally {
-    overlayPaths.forEach(overlayPath => {
-      try {
-        if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath);
-      } catch (err) {
-        console.error(`[processVideos] Failed to delete overlay ${overlayPath}:`, err);
-      }
+    await new Promise((resolve, reject) => {
+      const filter = `[0:v]scale=${preset.targetW}:${preset.targetH}:force_original_aspect_ratio=increase,crop=${preset.targetW}:${preset.targetH}[v];[1:v]scale=${preset.targetW}:${preset.targetH}[ov];[v][ov]overlay=0:0`;
+      const args = ['-i', file, '-i', ovPath, '-filter_complex', filter, '-c:v', 'libx264', '-preset', preset.preset, '-crf', preset.crf, '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
+      const proc = spawn('ffmpeg', args);
+      proc.on('close', (code) => {
+        fs.unlinkSync(ovPath);
+        code === 0 ? resolve() : reject(new Error(`FFmpeg error ${code}`));
+      });
     });
-  }
+    return out;
+  }));
 }
 
-function addImageOverlay(inputPath, outputPath, overlayImagePath, qualityPreset) {
+function concatenateVideos(paths) {
   return new Promise((resolve, reject) => {
-    console.log(`[addImageOverlay] Start with preset: ${JSON.stringify(qualityPreset)}`);
-
-    // Build filter_complex based on quality preset
-    let filterComplex;
-    if (qualityPreset.outputScale) {
-      // Preview: scale down to 720p
-      filterComplex = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0[scaled];[scaled]${qualityPreset.outputScale}`;
-    } else {
-      // Final: keep full resolution
-      filterComplex = '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];[bg][1:v]overlay=0:0';
-    }
-
-    const ffmpeg = spawn('ffmpeg', [
-      '-i', inputPath,
-      '-i', overlayImagePath,
-      '-filter_complex', filterComplex,
-      '-c:v', 'libx264',
-      '-c:a', 'aac',
-      '-preset', qualityPreset.preset,
-      '-crf', qualityPreset.crf,
-      '-movflags', '+faststart',
-      '-y', outputPath,
-    ]);
-
-    let stderrOutput = '';
-
-    ffmpeg.stderr.on('data', (data) => {
-      const msg = data.toString();
-      stderrOutput += msg;
-      console.error('[FFmpeg stderr]', msg);
-    });
-
-    ffmpeg.on('close', (code) => {
-      console.log(`[ffmpeg] Process exited with code ${code}`);
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg overlay failed with code: ${code}\n${stderrOutput}`));
-      }
-    });
-
-    ffmpeg.on('error', (error) => {
-      console.error('[ffmpeg] Spawn error:', error);
-      reject(new Error(`FFmpeg spawn error: ${error.message}`));
+    const out = `/tmp/fin_${uuidv4()}.mp4`;
+    const list = `/tmp/list_${uuidv4()}.txt`;
+    fs.writeFileSync(list, paths.map(p => `file '${p}'`).join('\n'));
+    const proc = spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', out]);
+    proc.on('close', (code) => {
+      fs.unlinkSync(list);
+      code === 0 ? resolve(out) : reject(new Error('Concat failed'));
     });
   });
 }
 
-function concatenateVideos(inputPaths) {
-  return new Promise((resolve, reject) => {
-    const outputPath = `/tmp/final_${uuidv4()}.mp4`;
-    const concatFile = `/tmp/concat_${uuidv4()}.txt`;
-    fs.writeFileSync(concatFile, inputPaths.map(p => `file '${p}'`).join('\n'));
-
-    const ffmpeg = spawn('ffmpeg', [
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatFile,
-      '-c', 'copy',
-      '-movflags', '+faststart',
-      '-y', outputPath
-    ]);
-
-    let stderrOutput = '';
-
-    ffmpeg.stderr.on('data', (data) => {
-      const msg = data.toString();
-      stderrOutput += msg;
-      console.error('[FFmpeg stderr]', msg);
-    });
-
-    ffmpeg.on('close', (code) => {
-      fs.unlinkSync(concatFile);
-      if (code === 0) {
-        resolve(outputPath);
-      } else {
-        reject(new Error(`Concat failed with code ${code}\n${stderrOutput}`));
-      }
-    });
-
-    ffmpeg.on('error', reject);
-  });
+async function uploadToGCS(filePath, fileName, subPath) {
+  const dest = `${subPath}/${fileName}`;
+  await outputBucket.upload(filePath, { destination: dest, metadata: { cacheControl: 'public, max-age=31536000' } });
+  const [url] = await outputBucket.file(dest).getSignedUrl({ version: 'v4', action: 'read', expires: Date.now() + 3600000 });
+  return url;
 }
 
-async function uploadToGCS(filePath, fileName, subPath = 'posts') {
-  const destination = `${subPath}/${fileName}`;
-
-  await outputBucket.upload(filePath, {
-    destination,
-    metadata: { cacheControl: 'public, max-age=31536000' },
-  });
-
-  const [signedUrl] = await outputBucket.file(destination).getSignedUrl({
-    version: 'v4',
-    action: 'read',
-    expires: Date.now() + 60 * 60 * 1000,
-  });
-
-  return signedUrl;
+class ProgressTracker {
+  constructor(res) { this.res = res; this.step = 0; this.total = 6; }
+  update(msg, prog) {
+    this.step++;
+    this.res.write(`data: ${JSON.stringify({ step: this.step, totalSteps: this.total, progress: prog, message: msg, timestamp: Date.now() })}\n\n`);
+  }
+  complete(videoUrl) {
+    this.res.write(`data: ${JSON.stringify({ step: this.total, progress: 100, message: 'Complete!', videoUrl, complete: true, timestamp: Date.now() })}\n\n`);
+    this.res.end();
+  }
+  error(err) { this.res.write(`data: ${JSON.stringify({ error: err })}\n\n`); this.res.end(); }
 }
 
-async function cleanup(sessionId, localFiles = []) {
-  localFiles.forEach(filePath => {
-    try {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch { }
-  });
-
-  try {
-    const tempFiles = fs.readdirSync('/tmp').filter(f => f.includes('input_') || f.includes('processed_') || f.includes('final_') || f.includes('overlay_'));
-    tempFiles.forEach(f => {
-      try { fs.unlinkSync(`/tmp/${f}`); } catch { }
-    });
-  } catch { }
-
-  if (sessionId && sessionId !== 'unknown') {
-    try {
-      const [files] = await cacheBucket.getFiles({ prefix: `${sessionId}/` });
-      await Promise.all(files.map(file => file.delete().catch(() => { })));
-    } catch { }
+async function cleanup(sid, files = []) {
+  files.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
+  if (sid) {
+    const [remote] = await cacheBucket.getFiles({ prefix: `${sid}/` });
+    await Promise.all(remote.map(f => f.delete().catch(() => {})));
   }
 }
