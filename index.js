@@ -33,15 +33,11 @@ const LAYOUT_CONFIG = {
   textOutlineWidth: 12
 };
 
-// Initialize Font
 if (!fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   throw new Error(`Font file not found at ${LAYOUT_CONFIG.fontPath}`);
 }
 registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 
-/**
- * Text Wrapping Utility
- */
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
@@ -65,9 +61,6 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   return { fontSize: 10, lines: [text] };
 }
 
-/**
- * Image Overlay Generator (Fixed at 1080x1920)
- */
 function createTextOverlayImage(title, ranks, ranksToShow) {
   const width = 1080;
   const height = 1920;
@@ -77,7 +70,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
 
-  // Title Logic
   const titleResult = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
   const numLines = titleResult.lines.length;
   const textContentHeight = (numLines * titleResult.fontSize) + ((numLines - 1) * LAYOUT_CONFIG.titleLineSpacing);
@@ -94,7 +86,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     currentY += titleResult.fontSize + LAYOUT_CONFIG.titleLineSpacing;
   }
 
-  // Rank Logic
   const startIdx = ranks.length - ranksToShow;
   for (let i = 0; i < ranksToShow; i++) {
     const rankIdx = startIdx + i;
@@ -116,7 +107,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
     ctx.fillText(rankResult.lines[0], LAYOUT_CONFIG.rankTextX, rankTextY);
   }
 
-  // Watermark
   ctx.font = `${LAYOUT_CONFIG.watermarkFontSize}px CustomFont`;
   const wmMetrics = ctx.measureText(LAYOUT_CONFIG.watermarkText);
   const wmX = width - wmMetrics.width - LAYOUT_CONFIG.watermarkPadding;
@@ -130,9 +120,6 @@ function createTextOverlayImage(title, ranks, ranksToShow) {
   return canvas;
 }
 
-/**
- * Progress Reporting Class
- */
 class ProgressTracker {
   constructor(res) { this.res = res; }
   update(msg, prog) {
@@ -148,9 +135,6 @@ class ProgressTracker {
   }
 }
 
-/**
- * MAIN HTTP HANDLER
- */
 functions.http('processVideos', async (req, res) => {
   res.set({
     'Access-Control-Allow-Origin': '*',
@@ -159,9 +143,35 @@ functions.http('processVideos', async (req, res) => {
   });
 
   if (req.method === 'OPTIONS') return res.status(204).send('');
-  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
 
-  const { sessionId, title, ranks, filePaths, postId } = req.body;
+  const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
+
+  // --- NEW: Handling Signed URLs for the Final Service ---
+  if (action === 'getUploadUrls') {
+    try {
+      const uploadUrls = [];
+      const filePathsResult = [];
+      for (let i = 0; i < videoCount; i++) {
+        const contentType = fileTypes?.[i] || 'video/mp4';
+        const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
+        const [url] = await cacheBucket.file(fileName).getSignedUrl({
+          version: 'v4',
+          action: 'write',
+          expires: Date.now() + 15 * 60 * 1000,
+          contentType
+        });
+        uploadUrls.push({ index: i, url });
+        filePathsResult.push(fileName);
+      }
+      return res.status(200).json({ uploadUrls, filePaths: filePathsResult, sessionId });
+    } catch (error) {
+      console.error('URL generation error:', error);
+      return res.status(500).json({ error: 'Failed to generate upload URLs' });
+    }
+  }
+
+  // --- RENDERING PHASE (SSE) ---
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const tracker = new ProgressTracker(res);
 
   if (!sessionId || !postId) {
@@ -171,7 +181,6 @@ functions.http('processVideos', async (req, res) => {
   try {
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
 
-    // 1. Download fragments from GCS Cache
     tracker.update('Downloading fragments...', 15);
     const localFiles = await Promise.all(filePaths.map(async (fp, i) => {
       const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
@@ -179,7 +188,6 @@ functions.http('processVideos', async (req, res) => {
       return p;
     }));
 
-    // 2. Parallel Processing (1080p)
     tracker.update('Rendering 1080p overlays...', 40);
     const processedVideos = await Promise.all(localFiles.map(async (file, i) => {
       const out = `/tmp/proc_${i}_${uuidv4()}.mp4`;
@@ -191,14 +199,13 @@ functions.http('processVideos', async (req, res) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
         const args = ['-i', file, '-i', ovPath, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
         spawn('ffmpeg', args).on('close', code => {
-          fs.unlinkSync(ovPath);
+          if (fs.existsSync(ovPath)) fs.unlinkSync(ovPath);
           code === 0 ? resolve() : reject(new Error(`FFmpeg error ${code}`));
         });
       });
       return out;
     }));
 
-    // 3. Concatenate fragments
     tracker.update('Stitching final video...', 80);
     const finalPath = `/tmp/final_${uuidv4()}.mp4`;
     const listFile = `/tmp/list_${uuidv4()}.txt`;
@@ -207,12 +214,11 @@ functions.http('processVideos', async (req, res) => {
     await new Promise((resolve, reject) => {
       const args = ['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', '-movflags', '+faststart', '-y', finalPath];
       spawn('ffmpeg', args).on('close', code => {
-        fs.unlinkSync(listFile);
+        if (fs.existsSync(listFile)) fs.unlinkSync(listFile);
         code === 0 ? resolve() : reject(new Error('Concat failed'));
       });
     });
 
-    // 4. Upload to ranktop-v bucket in the posts/ folder
     tracker.update('Uploading to storage...', 90);
     const destination = `${postId}.mp4`;
     await outputBucket.upload(finalPath, {
@@ -220,7 +226,6 @@ functions.http('processVideos', async (req, res) => {
       metadata: { cacheControl: 'public, max-age=31536000' }
     });
 
-    // 5. Cleanup local and GCS Cache fragments
     tracker.update('Cleaning cache...', 95);
     [...localFiles, ...processedVideos, finalPath].forEach(f => {
       try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
