@@ -214,7 +214,7 @@ functions.http('processVideos', async (req, res) => {
 
     // 4. Upload to ranktop-v bucket in the posts/ folder
     tracker.update('Uploading to storage...', 90);
-    const destination = `posts/${postId}.mp4`;
+    const destination = `${postId}.mp4`;
     await outputBucket.upload(finalPath, {
       destination,
       metadata: { cacheControl: 'public, max-age=31536000' }
