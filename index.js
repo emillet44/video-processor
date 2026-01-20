@@ -166,10 +166,14 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
 // --- Main HTTP Function ---
 
 functions.http('processVideos', async (req, res) => {
-  res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' });
+  res.set({ 
+    'Access-Control-Allow-Origin': '*', 
+    'Access-Control-Allow-Methods': 'POST', 
+    'Access-Control-Allow-Headers': 'Content-Type' 
+  });
+  
   if (req.method === 'OPTIONS') return res.status(204).send('');
 
-  // Fixed Destructuring: added fileTypes back in
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
   if (action === 'getUploadUrls') {
@@ -186,7 +190,14 @@ functions.http('processVideos', async (req, res) => {
     return res.json({ uploadUrls, filePaths: filePathsResult, sessionId });
   }
 
-  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  // SSE Setup
+  res.set({ 
+    'Content-Type': 'text/event-stream', 
+    'Cache-Control': 'no-cache, no-transform', 
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no' 
+  });
+  
   const tracker = new ProgressTracker(res, sessionId);
   const tempFiles = [];
 
