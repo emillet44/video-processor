@@ -5,12 +5,17 @@ FROM node:20-slim
 RUN apt-get update && apt-get install -y \
   ffmpeg \
   fontconfig \
+  fonts-noto-cjk \
+  fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
 
-# Add your custom font (assumes it's named myfont.ttf)
-COPY font.ttf /usr/share/fonts/truetype/font.ttf
+# Create the directory for custom fonts
+RUN mkdir -p /usr/share/fonts/truetype/custom
 
-# Rebuild font cache so ffmpeg can detect it
+# Copy BOTH fonts from your repo into the container
+COPY font.ttf /usr/share/fonts/truetype/custom/font.ttf
+
+# Rebuild font cache
 RUN fc-cache -f -v
 
 # Create app directory
