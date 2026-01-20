@@ -88,16 +88,12 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
         try {
           let img = emojiCache.get(url);
           if (!img) {
-            // Added timeout to prevent hanging on bad network
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
             img = await loadImage(url);
-            clearTimeout(timeoutId);
             emojiCache.set(url, img);
           }
           ctx.drawImage(img, currentX, y + (fontSize * 0.1), fontSize, fontSize);
         } catch (e) {
-          console.warn(`Emoji Load Failed: ${emoji} from ${url}`);
+          console.warn(`Emoji Load Failed: ${emoji}`);
         }
         currentX += fontSize;
       }
@@ -145,7 +141,6 @@ async function createTextOverlayImage(title, ranks, ranksToShow) {
     await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
   }
 
-  // Watermark
   const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
   await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
 
@@ -174,17 +169,21 @@ functions.http('processVideos', async (req, res) => {
   res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' });
   if (req.method === 'OPTIONS') return res.status(204).send('');
 
-  const { action, videoCount, sessionId, title, ranks, filePaths, postId } = req.body;
+  // Fixed Destructuring: added fileTypes back in
+  const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
   if (action === 'getUploadUrls') {
-    const uploadUrls = [], filePathsResult = []; 
-    for (let i = 0; i < videoCount; i++) { 
-      const type = fileTypes?.[i] || 'video/mp4'; 
-      const fileName = `${sessionId}/v_${i}.${type.split('/')[1] || 'mp4'}`; 
-      const [url] = await cacheBucket.file(fileName).getSignedUrl({ version: 'v4', action: 'write', expires: Date.now() + 900000, contentType: type }); 
-      uploadUrls.push({ index: i, url }); filePathsResult.push(fileName); 
-    } 
-    return res.json({ uploadUrls, filePaths: filePathsResult, sessionId }); 
+    const uploadUrls = [], filePathsResult = [];
+    for (let i = 0; i < videoCount; i++) {
+      const contentType = fileTypes?.[i] || 'video/mp4';
+      const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
+      const [url] = await cacheBucket.file(fileName).getSignedUrl({
+        version: 'v4', action: 'write', expires: Date.now() + 900000, contentType
+      });
+      uploadUrls.push({ index: i, url });
+      filePathsResult.push(fileName);
+    }
+    return res.json({ uploadUrls, filePaths: filePathsResult, sessionId });
   }
 
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -192,7 +191,7 @@ functions.http('processVideos', async (req, res) => {
   const tempFiles = [];
 
   try {
-    console.info(`[${sessionId}] Starting job for Post: ${postId}`);
+    console.info(`[${sessionId}] Job Started for Post: ${postId}`);
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     
     tracker.update('Downloading fragments...', 10);
@@ -216,14 +215,12 @@ functions.http('processVideos', async (req, res) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
         const args = ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
         
-        const ff = spawn('ffmpeg', args);
-        // Only log errors or exit codes, don't flood with frames
-        ff.on('error', (err) => { console.error(`[${sessionId}] FFmpeg Spawn Error:`, err); reject(err); });
-        ff.on('close', code => {
-          try { if (fs.existsSync(ov)) fs.unlinkSync(ov); } catch {}
-          if (code === 0) resolve();
-          else { console.error(`[${sessionId}] FFmpeg Failed Code: ${code}`); reject(new Error(`FFmpeg failed`)); }
-        });
+        spawn('ffmpeg', args)
+          .on('error', reject)
+          .on('close', code => {
+            try { if (fs.existsSync(ov)) fs.unlinkSync(ov); } catch {}
+            code === 0 ? resolve() : reject(new Error(`FFmpeg error ${code}`));
+          });
       });
       processed.push(out);
     }
@@ -242,10 +239,11 @@ functions.http('processVideos', async (req, res) => {
     const dest = `${postId}.mp4`;
     await outputBucket.upload(final, { destination: dest, metadata: { cacheControl: 'public, max-age=31536000' } });
 
-    console.info(`[${sessionId}] Job Complete. Output: ${dest}`);
+    console.info(`[${sessionId}] Job Finished: ${dest}`);
     tracker.complete(dest);
+
   } catch (error) {
-    console.error(`[${sessionId}] CRITICAL ERROR:`, error);
+    console.error(`[${sessionId}] ERROR:`, error);
     tracker.error(error.message);
   } finally {
     tempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
@@ -256,7 +254,7 @@ functions.http('processVideos', async (req, res) => {
 class ProgressTracker {
   constructor(res, sid) { this.res = res; this.sid = sid; }
   update(msg, prog) { 
-    console.debug(`[${this.sid}] ${msg} (${prog}%)`);
+    console.info(`[${this.sid}] ${msg} (${prog}%)`);
     this.res.write(`data: ${JSON.stringify({ message: msg, progress: prog, timestamp: Date.now() })}\n\n`); 
   }
   complete(dest) { 
