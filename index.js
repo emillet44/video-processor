@@ -163,6 +163,28 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   return { fontSize: 10, lines: [text] };
 }
 
+// --- Thumbnail Generation ---
+
+async function generateThumbnail(videoPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    // Extract frame at 1 second, high quality JPEG
+    const args = [
+      '-i', videoPath,
+      '-ss', '00:00:01',
+      '-vframes', '1',
+      '-q:v', '2',
+      '-y',
+      outputPath
+    ];
+
+    spawn('ffmpeg', args)
+      .on('error', reject)
+      .on('close', code => {
+        code === 0 ? resolve() : reject(new Error(`Thumbnail generation failed: ${code}`));
+      });
+  });
+}
+
 // --- Main HTTP Function ---
 
 functions.http('processVideos', async (req, res) => {
@@ -246,15 +268,31 @@ functions.http('processVideos', async (req, res) => {
         .on('close', c => c === 0 ? resolve() : reject(new Error('Stitch failed')));
     });
 
+    tracker.update('Generating thumbnail...', 85);
+    const thumbnailPath = `/tmp/thumb_${uuidv4()}.jpg`;
+    tempFiles.push(thumbnailPath);
+    await generateThumbnail(final, thumbnailPath);
+
     tracker.update('Uploading to storage...', 90);
-    const dest = `${postId}.mp4`;
-    await outputBucket.upload(final, { destination: dest, metadata: { cacheControl: 'public, max-age=31536000' } });
+    const videoDest = `${postId}.mp4`;
+    const thumbDest = `${postId}-thumb.jpg`;
+    
+    await Promise.all([
+      outputBucket.upload(final, { 
+        destination: videoDest, 
+        metadata: { cacheControl: 'public, max-age=31536000' } 
+      }),
+      outputBucket.upload(thumbnailPath, { 
+        destination: thumbDest, 
+        metadata: { cacheControl: 'public, max-age=31536000' } 
+      })
+    ]);
 
     const [remoteFiles] = await cacheBucket.getFiles({ prefix: `${sessionId}/` });
     await Promise.all(remoteFiles.map(f => f.delete().catch(() => {})));
     
-    console.info(`[${sessionId}] Job Finished: ${dest}`);
-    tracker.complete(dest);
+    console.info(`[${sessionId}] Job Finished: ${videoDest}, ${thumbDest}`);
+    tracker.complete(videoDest);
 
   } catch (error) {
     console.error(`[${sessionId}] ERROR:`, error);
