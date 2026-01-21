@@ -217,7 +217,7 @@ functions.http('processVideos', async (req, res) => {
       const out = `/tmp/proc_${i}_${uuidv4()}.mp4`, ov = `/tmp/ov_${i}_${uuidv4()}.png`;
       tempFiles.push(out, ov);
 
-      tracker.update(`Rendering fragment ${i + 1}/${local.length}...`, 15 + Math.floor((i / local.length) * 60));
+      tracker.update(`Rendering fragment ${i + 1}/${local.length}...`, 15 + Math.floor(((i + 1) / local.length) * 60));
 
       const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
       fs.writeFileSync(ov, canvas.toBuffer('image/png'));
@@ -225,7 +225,7 @@ functions.http('processVideos', async (req, res) => {
       await new Promise((resolve, reject) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
         const args = ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
-        
+    
         spawn('ffmpeg', args)
           .on('error', reject)
           .on('close', code => {
@@ -250,6 +250,9 @@ functions.http('processVideos', async (req, res) => {
     const dest = `${postId}.mp4`;
     await outputBucket.upload(final, { destination: dest, metadata: { cacheControl: 'public, max-age=31536000' } });
 
+    const [remoteFiles] = await cacheBucket.getFiles({ prefix: `${sessionId}/` });
+    await Promise.all(remoteFiles.map(f => f.delete().catch(() => {})));
+    
     console.info(`[${sessionId}] Job Finished: ${dest}`);
     tracker.complete(dest);
 
