@@ -9,6 +9,7 @@ const { createCanvas, registerFont, loadImage } = require('canvas');
 const storage = new Storage();
 const cacheBucket = storage.bucket('ranktop-v-cache');
 const outputBucket = storage.bucket('ranktop-v');
+const thumbnailBucket = storage.bucket('ranktop-v-thumb');
 
 const LAYOUT_CONFIG = {
   fontPath: '/usr/share/fonts/truetype/custom/font.ttf',
@@ -275,16 +276,19 @@ functions.http('processVideos', async (req, res) => {
 
     tracker.update('Uploading to storage...', 90);
     const videoDest = `${postId}.mp4`;
-    const thumbDest = `${postId}-thumb.jpg`;
+    const thumbDest = `${postId}.jpg`;
     
     await Promise.all([
       outputBucket.upload(final, { 
         destination: videoDest, 
         metadata: { cacheControl: 'public, max-age=31536000' } 
       }),
-      outputBucket.upload(thumbnailPath, { 
+      thumbnailBucket.upload(thumbnailPath, { 
         destination: thumbDest, 
-        metadata: { cacheControl: 'public, max-age=31536000' } 
+        metadata: { 
+          cacheControl: 'public, max-age=31536000',
+          contentType: 'image/jpeg'
+        } 
       })
     ]);
 
