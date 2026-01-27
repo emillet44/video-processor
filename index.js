@@ -194,7 +194,7 @@ functions.http('processVideos', async (req, res) => {
     'Access-Control-Allow-Methods': 'POST', 
     'Access-Control-Allow-Headers': 'Content-Type' 
   });
-  
+   
   if (req.method === 'OPTIONS') return res.status(204).send('');
 
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
@@ -218,9 +218,12 @@ functions.http('processVideos', async (req, res) => {
     'Content-Type': 'text/event-stream', 
     'Cache-Control': 'no-cache, no-transform', 
     'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no' 
+    'X-Accel-Buffering': 'no',
+    'Content-Encoding': 'none' // Crucial to prevent GZIP buffering
   });
-  
+   
+  if (res.flushHeaders) res.flushHeaders();
+
   const tracker = new ProgressTracker(res, sessionId);
   const tempFiles = [];
 
@@ -248,7 +251,7 @@ functions.http('processVideos', async (req, res) => {
       await new Promise((resolve, reject) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
         const args = ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
-    
+     
         spawn('ffmpeg', args)
           .on('error', reject)
           .on('close', code => {
