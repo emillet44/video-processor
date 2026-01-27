@@ -311,16 +311,25 @@ functions.http('processVideos', async (req, res) => {
 });
 
 class ProgressTracker {
-  constructor(res, sid) { this.res = res; this.sid = sid; }
+  constructor(res, sid) { 
+    this.res = res; 
+    this.sid = sid;
+    // KEEP-ALIVE: Send a comment line every 15s to prevent timeouts during long renders
+    this.interval = setInterval(() => {
+      this.res.write(': keep-alive\n\n');
+    }, 15000);
+  }
   update(msg, prog) { 
     console.info(`[${this.sid}] ${msg} (${prog}%)`);
     this.res.write(`data: ${JSON.stringify({ message: msg, progress: prog, timestamp: Date.now() })}\n\n`); 
   }
   complete(dest) { 
+    clearInterval(this.interval);
     this.res.write(`data: ${JSON.stringify({ complete: true, videoUrl: dest, progress: 100 })}\n\n`); 
     this.res.end(); 
   }
   error(err) { 
+    clearInterval(this.interval);
     this.res.write(`data: ${JSON.stringify({ error: err })}\n\n`); 
     this.res.end(); 
   }
