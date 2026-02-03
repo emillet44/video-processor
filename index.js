@@ -24,11 +24,24 @@ const LAYOUT_CONFIG = {
 };
 
 const emojiCache = new Map();
-
 if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
-} else {
-  console.error(`CRITICAL: Font missing at ${LAYOUT_CONFIG.fontPath}`);
+}
+
+async function notifyWebsite(postId, status, errorMessage = null) {
+  const url = `${process.env.WEBSITE_URL}/api/internal/update-post`;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-internal-secret': process.env.INTERNAL_SECRET 
+      },
+      body: JSON.stringify({ postId, status, errorMessage })
+    });
+  } catch (err) {
+    console.error("Webhook failed:", err);
+  }
 }
 
 // --- Utilities ---
@@ -189,148 +202,80 @@ async function generateThumbnail(videoPath, outputPath) {
 // --- Main HTTP Function ---
 
 functions.http('processVideos', async (req, res) => {
-  res.set({ 
-    'Access-Control-Allow-Origin': '*', 
-    'Access-Control-Allow-Methods': 'POST', 
-    'Access-Control-Allow-Headers': 'Content-Type' 
-  });
-   
-  if (req.method === 'OPTIONS') return res.status(204).send('');
-
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
+  // Signed URL Generation (Remains synchronous for the client)
   if (action === 'getUploadUrls') {
-    const uploadUrls = [], filePathsResult = [];
+    const uploadUrls = [];
     for (let i = 0; i < videoCount; i++) {
       const contentType = fileTypes?.[i] || 'video/mp4';
       const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
-      const [url] = await cacheBucket.file(fileName).getSignedUrl({
-        version: 'v4', action: 'write', expires: Date.now() + 900000, contentType
+      const [url] = await cacheBucket.file(fileName).getSignedUrl({ 
+        version: 'v4', action: 'write', expires: Date.now() + 900000, contentType 
       });
       uploadUrls.push({ index: i, url });
-      filePathsResult.push(fileName);
     }
-    return res.json({ uploadUrls, filePaths: filePathsResult, sessionId });
+    return res.json({ uploadUrls, sessionId });
   }
 
-  // SSE Setup
-  res.set({ 
-    'Content-Type': 'text/event-stream', 
-    'Cache-Control': 'no-cache, no-transform', 
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-    'Content-Encoding': 'none' // Crucial to prevent GZIP buffering
-  });
-   
-  if (res.flushHeaders) res.flushHeaders();
+  // --- RENDERING PHASE ---
+  // send the response IMMEDIATELY so Vercel doesn't time out.
+  // The actual work happens after res.send() in the background of the Cloud Run instance.
+  res.status(202).send({ status: 'Processing started' });
 
-  const tracker = new ProgressTracker(res, sessionId);
   const tempFiles = [];
-
   try {
-    console.info(`[${sessionId}] Job Started for Post: ${postId}`);
+    await notifyWebsite(postId, 'PROCESSING');
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     
-    tracker.update('Downloading fragments...', 10);
+    // Download
     const local = await Promise.all(filePaths.map(async (fp, i) => {
       const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
       await cacheBucket.file(fp).download({ destination: p });
       tempFiles.push(p); return p;
     }));
 
+    // Process
     const processed = [];
     for (let i = 0; i < local.length; i++) {
       const out = `/tmp/proc_${i}_${uuidv4()}.mp4`, ov = `/tmp/ov_${i}_${uuidv4()}.png`;
       tempFiles.push(out, ov);
-
-      tracker.update(`Rendering fragment ${i + 1}/${local.length}...`, 15 + Math.floor(((i + 1) / local.length) * 60));
-
       const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
       fs.writeFileSync(ov, canvas.toBuffer('image/png'));
 
       await new Promise((resolve, reject) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
-        const args = ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out];
-     
-        spawn('ffmpeg', args)
-          .on('error', reject)
-          .on('close', code => {
-            try { if (fs.existsSync(ov)) fs.unlinkSync(ov); } catch {}
-            code === 0 ? resolve() : reject(new Error(`FFmpeg error ${code}`));
-          });
+        spawn('ffmpeg', ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out])
+          .on('close', c => c === 0 ? resolve() : reject(new Error(`FFmpeg error`)));
       });
       processed.push(out);
     }
 
-    tracker.update('Stitching final video...', 80);
+    // Stitch
     const final = `/tmp/f_${uuidv4()}.mp4`, list = `/tmp/l_${uuidv4()}.txt`;
     tempFiles.push(final, list);
     fs.writeFileSync(list, processed.map(p => `file '${p}'`).join('\n'));
-
     await new Promise((resolve, reject) => {
       spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', final])
         .on('close', c => c === 0 ? resolve() : reject(new Error('Stitch failed')));
     });
 
-    tracker.update('Generating thumbnail...', 85);
-    const thumbnailPath = `/tmp/thumb_${uuidv4()}.jpg`;
-    tempFiles.push(thumbnailPath);
-    await generateThumbnail(final, thumbnailPath);
+    // Thumbnail & Upload
+    const thumb = `/tmp/t_${uuidv4()}.jpg`;
+    tempFiles.push(thumb);
+    await generateThumbnail(final, thumb);
 
-    tracker.update('Uploading to storage...', 90);
-    const videoDest = `${postId}.mp4`;
-    const thumbDest = `${postId}.jpg`;
-    
     await Promise.all([
-      outputBucket.upload(final, { 
-        destination: videoDest, 
-        metadata: { cacheControl: 'public, max-age=31536000' } 
-      }),
-      thumbnailBucket.upload(thumbnailPath, { 
-        destination: thumbDest, 
-        metadata: { 
-          cacheControl: 'public, max-age=31536000',
-          contentType: 'image/jpeg'
-        } 
-      })
+      outputBucket.upload(final, { destination: `${postId}.mp4` }),
+      thumbnailBucket.upload(thumb, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
     ]);
 
-    const [remoteFiles] = await cacheBucket.getFiles({ prefix: `${sessionId}/` });
-    await Promise.all(remoteFiles.map(f => f.delete().catch(() => {})));
-    
-    console.info(`[${sessionId}] Job Finished: ${videoDest}, ${thumbDest}`);
-    tracker.complete(videoDest);
-
+    await notifyWebsite(postId, 'READY');
   } catch (error) {
-    console.error(`[${sessionId}] ERROR:`, error);
-    tracker.error(error.message);
+    console.error("Job Error:", error);
+    await notifyWebsite(postId, 'FAILED', error.message);
   } finally {
-    tempFiles.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
     emojiCache.clear();
   }
 });
-
-class ProgressTracker {
-  constructor(res, sid) { 
-    this.res = res; 
-    this.sid = sid;
-    // KEEP-ALIVE: Send a comment line every 15s to prevent timeouts during long renders
-    this.interval = setInterval(() => {
-      this.res.write(': keep-alive\n\n');
-    }, 15000);
-  }
-  update(msg, prog) { 
-    console.info(`[${this.sid}] ${msg} (${prog}%)`);
-    this.res.write(`data: ${JSON.stringify({ message: msg, progress: prog, timestamp: Date.now() })}\n\n`); 
-  }
-  complete(dest) { 
-    clearInterval(this.interval);
-    this.res.write(`data: ${JSON.stringify({ complete: true, videoUrl: dest, progress: 100 })}\n\n`); 
-    this.res.end(); 
-  }
-  error(err) { 
-    clearInterval(this.interval);
-    this.res.write(`data: ${JSON.stringify({ error: err })}\n\n`); 
-    this.res.end(); 
-  }
-}
