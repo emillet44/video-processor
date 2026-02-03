@@ -28,10 +28,21 @@ if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 }
 
-async function notifyWebsite(postId, status, errorMessage = null) {
-  const url = `${process.env.WEBSITE_URL}/api/internal/update-post`;
+async function notifyWebsite(postId, status, errorMessage = null, req = null) {
+  // 1. Default to production
+  let baseUrl = "https://ranktop.net";
+
+  // 2. CHECK: Did requester say where to send the webhook?
+  // look for a custom header 'x-callback-url'
+  if (req && req.headers['x-callback-url']) {
+    baseUrl = req.headers['x-callback-url'].replace(/\/$/, "");
+    console.info(`Using override callback URL: ${baseUrl}`);
+  }
+
+  const url = `${baseUrl}/api/internal/update-post`;
+
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
@@ -39,8 +50,10 @@ async function notifyWebsite(postId, status, errorMessage = null) {
       },
       body: JSON.stringify({ postId, status, errorMessage })
     });
+    
+    if (!res.ok) console.error(`Webhook rejected (${res.status})`);
   } catch (err) {
-    console.error("Webhook failed:", err);
+    console.error("Webhook notification failed:", err.message);
   }
 }
 
