@@ -29,11 +29,9 @@ if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
 }
 
 async function notifyWebsite(postId, status, errorMessage = null, req = null) {
-  // 1. Default to production
   let baseUrl = "https://ranktop.net";
 
-  // 2. CHECK: Did requester say where to send the webhook?
-  // look for a custom header 'x-callback-url'
+  // Check for custom callback URL from header
   if (req && req.headers['x-callback-url']) {
     baseUrl = req.headers['x-callback-url'].replace(/\/$/, "");
     console.info(`Using override callback URL: ${baseUrl}`);
@@ -190,11 +188,8 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   return { fontSize: 10, lines: [text] };
 }
 
-// --- Thumbnail Generation ---
-
 async function generateThumbnail(videoPath, outputPath) {
   return new Promise((resolve, reject) => {
-    // Extract frame at 1 second, high quality JPEG
     const args = [
       '-i', videoPath,
       '-ss', '00:00:01',
@@ -204,11 +199,18 @@ async function generateThumbnail(videoPath, outputPath) {
       outputPath
     ];
 
-    spawn('ffmpeg', args)
-      .on('error', reject)
-      .on('close', code => {
-        code === 0 ? resolve() : reject(new Error(`Thumbnail generation failed: ${code}`));
-      });
+    const proc = spawn('ffmpeg', args);
+    let stderr = '';
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => {
+      if (code === 0) {
+        resolve();
+      } else {
+        console.error('Thumbnail FFmpeg stderr:', stderr);
+        reject(new Error(`Thumbnail generation failed: ${code}`));
+      }
+    });
   });
 }
 
@@ -217,7 +219,7 @@ async function generateThumbnail(videoPath, outputPath) {
 functions.http('processVideos', async (req, res) => {
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
-  // Signed URL Generation (Remains synchronous for the client)
+  // Signed URL Generation
   if (action === 'getUploadUrls') {
     const uploadUrls = [];
     for (let i = 0; i < videoCount; i++) {
@@ -232,13 +234,9 @@ functions.http('processVideos', async (req, res) => {
   }
 
   // --- RENDERING PHASE ---
-  // send the response IMMEDIATELY so Vercel doesn't time out.
-  // The actual work happens after res.send() in the background of the Cloud Run instance.
-  res.status(202).send({ status: 'Processing started' });
-
   const tempFiles = [];
   try {
-    await notifyWebsite(postId, 'PROCESSING');
+    await notifyWebsite(postId, 'PROCESSING', null, req);
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     
     // Download
@@ -258,8 +256,26 @@ functions.http('processVideos', async (req, res) => {
 
       await new Promise((resolve, reject) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
-        spawn('ffmpeg', ['-i', local[i], '-i', ov, '-filter_complex', filter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', '-y', out])
-          .on('close', c => c === 0 ? resolve() : reject(new Error(`FFmpeg error`)));
+        let stderr = '';
+        
+        const proc = spawn('ffmpeg', [
+          '-i', local[i], '-i', ov, 
+          '-filter_complex', filter, 
+          '-c:v', 'libx264', '-preset', 'ultrafast', 
+          '-crf', '23', '-c:a', 'aac', 
+          '-movflags', '+faststart', '-y', out
+        ]);
+        
+        proc.stderr.on('data', (data) => { stderr += data.toString(); });
+        proc.on('error', reject);
+        proc.on('close', (c) => {
+          if (c === 0) {
+            resolve();
+          } else {
+            console.error('Process FFmpeg stderr:', stderr);
+            reject(new Error(`FFmpeg error code ${c}`));
+          }
+        });
       });
       processed.push(out);
     }
@@ -268,9 +284,24 @@ functions.http('processVideos', async (req, res) => {
     const final = `/tmp/f_${uuidv4()}.mp4`, list = `/tmp/l_${uuidv4()}.txt`;
     tempFiles.push(final, list);
     fs.writeFileSync(list, processed.map(p => `file '${p}'`).join('\n'));
+    
     await new Promise((resolve, reject) => {
-      spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', final])
-        .on('close', c => c === 0 ? resolve() : reject(new Error('Stitch failed')));
+      let stderr = '';
+      const proc = spawn('ffmpeg', [
+        '-f', 'concat', '-safe', '0', '-i', list, 
+        '-c', 'copy', '-movflags', '+faststart', '-y', final
+      ]);
+      
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      proc.on('error', reject);
+      proc.on('close', (c) => {
+        if (c === 0) {
+          resolve();
+        } else {
+          console.error('Stitch FFmpeg stderr:', stderr);
+          reject(new Error('Stitch failed'));
+        }
+      });
     });
 
     // Thumbnail & Upload
@@ -283,10 +314,15 @@ functions.http('processVideos', async (req, res) => {
       thumbnailBucket.upload(thumb, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
     ]);
 
-    await notifyWebsite(postId, 'READY');
+    await notifyWebsite(postId, 'READY', null, req);
+    
+    // Now we can respond successfully
+    res.status(200).json({ status: 'SUCCESS' });
+    
   } catch (error) {
     console.error("Job Error:", error);
-    await notifyWebsite(postId, 'FAILED', error.message);
+    await notifyWebsite(postId, 'FAILED', error.message, req);
+    res.status(500).json({ error: error.message });
   } finally {
     tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
     emojiCache.clear();
