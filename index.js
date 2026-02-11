@@ -227,15 +227,19 @@ functions.http('processVideos', async (req, res) => {
   // Signed URL Generation
   if (action === 'getUploadUrls') {
     const uploadUrls = [];
+    const filePaths = [];
+    
     for (let i = 0; i < videoCount; i++) {
       const contentType = fileTypes?.[i] || 'video/mp4';
       const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
+      filePaths.push(fileName);
+      
       const [url] = await cacheBucket.file(fileName).getSignedUrl({ 
         version: 'v4', action: 'write', expires: Date.now() + 900000, contentType 
       });
       uploadUrls.push({ index: i, url });
     }
-    return res.json({ uploadUrls, sessionId });
+    return res.json({ uploadUrls, filePaths, sessionId });
   }
 
   // --- RENDERING PHASE ---
