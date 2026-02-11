@@ -219,6 +219,11 @@ async function generateThumbnail(videoPath, outputPath) {
 functions.http('processVideos', async (req, res) => {
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
+  if (action !== 'getUploadUrls' && (!filePaths || !Array.isArray(filePaths))) {
+    console.error("Validation Error: filePaths is missing or not an array");
+    return res.status(400).json({ error: "Missing filePaths" });
+  }
+  
   // Signed URL Generation
   if (action === 'getUploadUrls') {
     const uploadUrls = [];
