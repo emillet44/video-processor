@@ -28,15 +28,27 @@ if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 }
 
+// --- Status Management (JSON File) ---
+async function updateStatusFile(postId, status, payload = {}) {
+  try {
+    const file = outputBucket.file(`${postId}.json`);
+    const data = JSON.stringify({ status, updatedAt: Date.now(), ...payload });
+    await file.save(data, { 
+      contentType: 'application/json',
+      resumable: false,
+      metadata: { cacheControl: 'no-cache' }
+    });
+  } catch (e) {
+    console.warn("Failed to update status file:", e.message);
+  }
+}
+
+// --- Database Webhook (Only used for final states) ---
 async function notifyWebsite(postId, status, errorMessage = null, req = null) {
   let baseUrl = "https://ranktop.net";
-
-  // Check for custom callback URL from header
   if (req && req.headers['x-callback-url']) {
     baseUrl = req.headers['x-callback-url'].replace(/\/$/, "");
-    console.info(`Using override callback URL: ${baseUrl}`);
   }
-
   const url = `${baseUrl}/api/internal/update-post`;
 
   try {
@@ -48,7 +60,6 @@ async function notifyWebsite(postId, status, errorMessage = null, req = null) {
       },
       body: JSON.stringify({ postId, status, errorMessage })
     });
-    
     if (!res.ok) console.error(`Webhook rejected (${res.status})`);
   } catch (err) {
     console.error("Webhook notification failed:", err.message);
@@ -56,7 +67,6 @@ async function notifyWebsite(postId, status, errorMessage = null, req = null) {
 }
 
 // --- Utilities ---
-
 function getEmojiUrl(emoji) {
   const codePoints = Array.from(emoji).map(c => c.codePointAt(0).toString(16)).join('-');
   return `https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.0.3/assets/72x72/${codePoints}.png`;
@@ -109,17 +119,15 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
     if (s.font === 'Emoji') {
       const emojis = Array.from(s.text);
       for (const emoji of emojis) {
-        const url = getEmojiUrl(emoji);
         try {
+          const url = getEmojiUrl(emoji);
           let img = emojiCache.get(url);
           if (!img) {
             img = await loadImage(url);
             emojiCache.set(url, img);
           }
           ctx.drawImage(img, currentX, y + (fontSize * 0.1), fontSize, fontSize);
-        } catch (e) {
-          console.warn(`Emoji Load Failed: ${emoji}`);
-        }
+        } catch (e) { console.warn(`Emoji Load Failed: ${emoji}`); }
         currentX += fontSize;
       }
     } else {
@@ -190,74 +198,74 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
 
 async function generateThumbnail(videoPath, outputPath) {
   return new Promise((resolve, reject) => {
-    const args = [
-      '-i', videoPath,
-      '-ss', '00:00:01',
-      '-vframes', '1',
-      '-q:v', '2',
-      '-y',
-      outputPath
-    ];
-
+    const args = ['-i', videoPath, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', outputPath];
     const proc = spawn('ffmpeg', args);
     let stderr = '';
     proc.stderr.on('data', (data) => { stderr += data.toString(); });
     proc.on('error', reject);
-    proc.on('close', code => {
-      if (code === 0) {
-        resolve();
-      } else {
-        console.error('Thumbnail FFmpeg stderr:', stderr);
-        reject(new Error(`Thumbnail generation failed: ${code}`));
-      }
-    });
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Thumbnail failed: ${code} ${stderr}`)));
   });
 }
 
 // --- Main HTTP Function ---
-
 functions.http('processVideos', async (req, res) => {
   const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
 
-  if (action !== 'getUploadUrls' && (!filePaths || !Array.isArray(filePaths))) {
-    console.error("Validation Error: filePaths is missing or not an array");
-    return res.status(400).json({ error: "Missing filePaths" });
+  // 1. Check Status (Used by Client Polling)
+  if (action === 'checkStatus') {
+    try {
+      const file = outputBucket.file(`${postId}.json`);
+      const [exists] = await file.exists();
+      if (!exists) return res.json({ status: 'PENDING' });
+      const [content] = await file.download();
+      return res.json(JSON.parse(content.toString()));
+    } catch (e) {
+      return res.status(500).json({ status: 'ERROR', error: e.message });
+    }
   }
-  
-  // Signed URL Generation
+
+  // 2. Generate Upload URLs
   if (action === 'getUploadUrls') {
-    const uploadUrls = [];
-    const filePaths = [];
+    if (!fileTypes || !Array.isArray(fileTypes)) return res.status(400).json({ error: "Missing fileTypes" });
     
+    const uploadUrls = [], generatedPaths = [];
     for (let i = 0; i < videoCount; i++) {
-      const contentType = fileTypes?.[i] || 'video/mp4';
+      const contentType = fileTypes[i] || 'video/mp4';
       const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
-      filePaths.push(fileName);
-      
+      generatedPaths.push(fileName);
       const [url] = await cacheBucket.file(fileName).getSignedUrl({ 
         version: 'v4', action: 'write', expires: Date.now() + 900000, contentType 
       });
       uploadUrls.push({ index: i, url });
     }
-    return res.json({ uploadUrls, filePaths, sessionId });
+    return res.json({ uploadUrls, filePaths: generatedPaths, sessionId });
   }
 
-  // --- RENDERING PHASE ---
+  // 3. Main Processing Job
+  if (!filePaths || !postId) {
+    return res.status(400).json({ error: "Missing filePaths or postId" });
+  }
+
   const tempFiles = [];
   try {
-    await notifyWebsite(postId, 'PROCESSING', null, req);
+    // A. Start - Create Status File
+    await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     
-    // Download
+    // B. Download
     const local = await Promise.all(filePaths.map(async (fp, i) => {
       const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
       await cacheBucket.file(fp).download({ destination: p });
       tempFiles.push(p); return p;
     }));
 
-    // Process
+    // C. Render Segments
     const processed = [];
     for (let i = 0; i < local.length; i++) {
+      // Update progress occasionally
+      const prog = 10 + Math.floor((i / local.length) * 60);
+      await updateStatusFile(postId, 'PROCESSING', { progress: prog });
+
       const out = `/tmp/proc_${i}_${uuidv4()}.mp4`, ov = `/tmp/ov_${i}_${uuidv4()}.png`;
       tempFiles.push(out, ov);
       const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
@@ -265,55 +273,32 @@ functions.http('processVideos', async (req, res) => {
 
       await new Promise((resolve, reject) => {
         const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
-        let stderr = '';
-        
         const proc = spawn('ffmpeg', [
           '-i', local[i], '-i', ov, 
           '-filter_complex', filter, 
-          '-c:v', 'libx264', '-preset', 'ultrafast', 
-          '-crf', '23', '-c:a', 'aac', 
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', 
           '-movflags', '+faststart', '-y', out
         ]);
-        
-        proc.stderr.on('data', (data) => { stderr += data.toString(); });
         proc.on('error', reject);
-        proc.on('close', (c) => {
-          if (c === 0) {
-            resolve();
-          } else {
-            console.error('Process FFmpeg stderr:', stderr);
-            reject(new Error(`FFmpeg error code ${c}`));
-          }
-        });
+        proc.on('close', c => c === 0 ? resolve() : reject(new Error(`FFmpeg error code ${c}`)));
       });
       processed.push(out);
     }
 
-    // Stitch
+    // D. Stitch
+    await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
     const final = `/tmp/f_${uuidv4()}.mp4`, list = `/tmp/l_${uuidv4()}.txt`;
     tempFiles.push(final, list);
     fs.writeFileSync(list, processed.map(p => `file '${p}'`).join('\n'));
     
     await new Promise((resolve, reject) => {
-      let stderr = '';
-      const proc = spawn('ffmpeg', [
-        '-f', 'concat', '-safe', '0', '-i', list, 
-        '-c', 'copy', '-movflags', '+faststart', '-y', final
-      ]);
-      
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      const proc = spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', final]);
       proc.on('error', reject);
-      proc.on('close', (c) => {
-        if (c === 0) {
-          resolve();
-        } else {
-          console.error('Stitch FFmpeg stderr:', stderr);
-          reject(new Error('Stitch failed'));
-        }
-      });
+      proc.on('close', c => c === 0 ? resolve() : reject(new Error('Stitch failed')));
     });
 
-    // Thumbnail & Upload
+    // E. Thumbnail & Upload
+    await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
     const thumb = `/tmp/t_${uuidv4()}.jpg`;
     tempFiles.push(thumb);
     await generateThumbnail(final, thumb);
@@ -323,13 +308,16 @@ functions.http('processVideos', async (req, res) => {
       thumbnailBucket.upload(thumb, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
     ]);
 
+    // F. SUCCESS: Notify Status File AND Database
+    await updateStatusFile(postId, 'READY', { progress: 100 });
     await notifyWebsite(postId, 'READY', null, req);
     
-    // Now we can respond successfully
     res.status(200).json({ status: 'SUCCESS' });
     
   } catch (error) {
     console.error("Job Error:", error);
+    // Failure: Notify both
+    await updateStatusFile(postId, 'FAILED', { error: error.message });
     await notifyWebsite(postId, 'FAILED', error.message, req);
     res.status(500).json({ error: error.message });
   } finally {
