@@ -19,7 +19,7 @@ const LAYOUT_CONFIG = {
   titleMaxLines: 2, titleBoxTopPadding: 30, titleBoxBottomPadding: 40,
   rankFontSize: 60, rankSpacing: 140, rankPaddingY: 80, rankNumX: 45,
   rankTextX: 125, rankBoxWidth: 830, rankMaxLines: 1,
-  watermarkText: 'ranktop.net', watermarkFontSize: 48, watermarkPadding: 20,
+  watermarkText: 'ranktop.net', watermarkFontSize: 48, watermarkPadding: 20, watermarkOpacity: 0.6,
   textOutlineWidth: 12
 };
 
@@ -175,8 +175,13 @@ async function createTextOverlayImage(title, ranks, ranksToShow) {
   }
 
   const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
+
+  ctx.save(); // Save current state (full opacity)
+  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity; // Set transparency
+  
   await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
 
+  ctx.restore();
   return canvas;
 }
 
