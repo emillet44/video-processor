@@ -28,12 +28,12 @@ if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
   registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
 }
 
-// --- Status Management (JSON File) ---
+// --- Status Management ---
 async function updateStatusFile(postId, status, payload = {}) {
   try {
     const file = outputBucket.file(`${postId}.json`);
     const data = JSON.stringify({ status, updatedAt: Date.now(), ...payload });
-    await file.save(data, { 
+    await file.save(data, {
       contentType: 'application/json',
       resumable: false,
       metadata: { cacheControl: 'no-cache' }
@@ -43,20 +43,19 @@ async function updateStatusFile(postId, status, payload = {}) {
   }
 }
 
-// --- Database Webhook (Only used for final states) ---
+// --- Database Webhook ---
 async function notifyWebsite(postId, status, errorMessage = null, req = null) {
   let baseUrl = "https://ranktop.net";
   if (req && req.headers['x-callback-url']) {
     baseUrl = req.headers['x-callback-url'].replace(/\/$/, "");
   }
   const url = `${baseUrl}/api/internal/update-post`;
-
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
-        'x-internal-secret': process.env.INTERNAL_SECRET 
+        'x-internal-secret': process.env.INTERNAL_SECRET
       },
       body: JSON.stringify({ postId, status, errorMessage })
     });
@@ -114,7 +113,6 @@ function measureMixedText(ctx, text, fontSize) {
 async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle = null, lineWidth = 0) {
   const segments = segmentTextByFont(text);
   let currentX = x;
-
   for (const s of segments) {
     if (s.font === 'Emoji') {
       const emojis = Array.from(s.text);
@@ -175,13 +173,11 @@ async function createTextOverlayImage(title, ranks, ranksToShow) {
   }
 
   const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
-
-  ctx.save(); // Save current state (full opacity)
-  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity; // Set transparency
-  
+  ctx.save();
+  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity;
   await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
-
   ctx.restore();
+
   return canvas;
 }
 
@@ -212,11 +208,201 @@ async function generateThumbnail(videoPath, outputPath) {
   });
 }
 
+// --- Shared: Composite overlay PNG onto a video clip ---
+function applyOverlay(inputPath, overlayPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
+    const proc = spawn('ffmpeg', [
+      '-i', inputPath, '-i', overlayPath,
+      '-filter_complex', filter,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac',
+      '-movflags', '+faststart', '-y', outputPath
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Overlay failed (${code}): ${stderr.slice(-300)}`)));
+  });
+}
+
+// --- Shared: Stitch a list of clips into one file ---
+function stitchClips(listPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Stitch failed (${code}): ${stderr.slice(-300)}`)));
+  });
+}
+
+// --- Pre-edited only: Cut a segment from a source file ---
+function cutSegment(sourcePath, startSec, endSec, outputPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-ss', String(startSec),
+      '-i', sourcePath,
+      '-t', String(endSec - startSec),
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+      '-c:a', 'aac',
+      '-movflags', '+faststart',
+      '-y', outputPath
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Cut failed (${code}): ${stderr.slice(-300)}`)));
+  });
+}
+
+// --- Pipeline: Auto-stitch (N separate uploaded clips) ---
+async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) {
+  const tempFiles = [];
+  try {
+    await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
+    const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
+
+    // Download all clips
+    const local = await Promise.all(filePaths.map(async (fp, i) => {
+      const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
+      await cacheBucket.file(fp).download({ destination: p });
+      tempFiles.push(p);
+      return p;
+    }));
+
+    // Overlay each clip
+    const processed = [];
+    for (let i = 0; i < local.length; i++) {
+      const prog = 10 + Math.floor((i / local.length) * 60);
+      await updateStatusFile(postId, 'PROCESSING', { progress: prog });
+
+      const ovPath = `/tmp/ov_${i}_${uuidv4()}.png`;
+      const outPath = `/tmp/proc_${i}_${uuidv4()}.mp4`;
+      tempFiles.push(ovPath, outPath);
+
+      const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
+      fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
+      await applyOverlay(local[i], ovPath, outPath);
+      processed.push(outPath);
+    }
+
+    // Stitch
+    await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
+    const listPath = `/tmp/l_${uuidv4()}.txt`;
+    const finalPath = `/tmp/f_${uuidv4()}.mp4`;
+    tempFiles.push(listPath, finalPath);
+    fs.writeFileSync(listPath, processed.map(p => `file '${p}'`).join('\n'));
+    await stitchClips(listPath, finalPath);
+
+    // Thumbnail & upload
+    await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
+    const thumbPath = `/tmp/t_${uuidv4()}.jpg`;
+    tempFiles.push(thumbPath);
+    await generateThumbnail(finalPath, thumbPath);
+
+    await Promise.all([
+      outputBucket.upload(finalPath, { destination: `${postId}.mp4` }),
+      thumbnailBucket.upload(thumbPath, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
+    ]);
+
+    await updateStatusFile(postId, 'READY', { progress: 100 });
+    await notifyWebsite(postId, 'READY', null, req);
+    res.status(200).json({ status: 'SUCCESS' });
+
+  } catch (error) {
+    console.error("Auto-Stitch Job Error:", error);
+    await updateStatusFile(postId, 'FAILED', { error: error.message });
+    await notifyWebsite(postId, 'FAILED', error.message, req);
+    res.status(500).json({ error: error.message });
+  } finally {
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    emojiCache.clear();
+  }
+}
+
+// --- Pipeline: Pre-edited (single source file, cut by timestamps) ---
+async function processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime }) {
+  const tempFiles = [];
+  try {
+    await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
+    const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
+    const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
+    const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
+
+    // Download source file
+    await updateStatusFile(postId, 'PROCESSING', { progress: 10 });
+    const sourcePath = `/tmp/source_${uuidv4()}${path.extname(filePath) || '.mp4'}`;
+    await cacheBucket.file(filePath).download({ destination: sourcePath });
+    tempFiles.push(sourcePath);
+
+    // Cut, overlay each segment
+    const processed = [];
+    for (let i = 0; i < sortedTimestamps.length; i++) {
+      const prog = 15 + Math.floor((i / sortedTimestamps.length) * 60);
+      await updateStatusFile(postId, 'PROCESSING', { progress: prog });
+
+      const segStart = sortedTimestamps[i].time;
+      const segEnd = i < sortedTimestamps.length - 1
+        ? sortedTimestamps[i + 1].time
+        : parsedEndTime;
+
+      if (segEnd === undefined || segEnd === null || segEnd <= segStart) {
+        throw new Error(`Invalid segment bounds for rank ${i + 1}: ${segStart} → ${segEnd}`);
+      }
+
+      const cutPath = `/tmp/cut_${i}_${uuidv4()}.mp4`;
+      const ovPath  = `/tmp/ov_${i}_${uuidv4()}.png`;
+      const outPath = `/tmp/proc_${i}_${uuidv4()}.mp4`;
+      tempFiles.push(cutPath, ovPath, outPath);
+
+      await cutSegment(sourcePath, segStart, segEnd, cutPath);
+
+      const ranksToShow = sortedTimestamps[i].rankIndex + 1;
+      const canvas = await createTextOverlayImage(title, parsedRanks, ranksToShow);
+      fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
+      await applyOverlay(cutPath, ovPath, outPath);
+      processed.push(outPath);
+    }
+
+    // Stitch
+    await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
+    const listPath  = `/tmp/l_${uuidv4()}.txt`;
+    const finalPath = `/tmp/f_${uuidv4()}.mp4`;
+    tempFiles.push(listPath, finalPath);
+    fs.writeFileSync(listPath, processed.map(p => `file '${p}'`).join('\n'));
+    await stitchClips(listPath, finalPath);
+
+    // Thumbnail & upload
+    await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
+    const thumbPath = `/tmp/t_${uuidv4()}.jpg`;
+    tempFiles.push(thumbPath);
+    await generateThumbnail(finalPath, thumbPath);
+
+    await Promise.all([
+      outputBucket.upload(finalPath, { destination: `${postId}.mp4` }),
+      thumbnailBucket.upload(thumbPath, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
+    ]);
+
+    await updateStatusFile(postId, 'READY', { progress: 100 });
+    await notifyWebsite(postId, 'READY', null, req);
+    res.status(200).json({ status: 'SUCCESS' });
+
+  } catch (error) {
+    console.error("Pre-Edited Job Error:", error);
+    await updateStatusFile(postId, 'FAILED', { error: error.message });
+    await notifyWebsite(postId, 'FAILED', error.message, req);
+    res.status(500).json({ error: error.message });
+  } finally {
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    emojiCache.clear();
+  }
+}
+
 // --- Main HTTP Function ---
 functions.http('processVideos', async (req, res) => {
-  const { action, videoCount, sessionId, fileTypes, title, ranks, filePaths, postId } = req.body;
+  const { action, videoCount, sessionId, fileTypes, fileType, title, ranks, filePaths, filePath, timestamps, endTime, postId, videoMode } = req.body;
 
-  // 1. Check Status (Used by Client Polling)
+  // 1. Check Status
   if (action === 'checkStatus') {
     try {
       const file = outputBucket.file(`${postId}.json`);
@@ -229,104 +415,43 @@ functions.http('processVideos', async (req, res) => {
     }
   }
 
-  // 2. Generate Upload URLs
+  // 2. Generate Upload URLs (auto-stitch: multiple files)
   if (action === 'getUploadUrls') {
     if (!fileTypes || !Array.isArray(fileTypes)) return res.status(400).json({ error: "Missing fileTypes" });
-    
     const uploadUrls = [], generatedPaths = [];
     for (let i = 0; i < videoCount; i++) {
       const contentType = fileTypes[i] || 'video/mp4';
       const fileName = `${sessionId}/v_${i}.${contentType.split('/')[1] || 'mp4'}`;
       generatedPaths.push(fileName);
-      const [url] = await cacheBucket.file(fileName).getSignedUrl({ 
-        version: 'v4', action: 'write', expires: Date.now() + 900000, contentType 
+      const [url] = await cacheBucket.file(fileName).getSignedUrl({
+        version: 'v4', action: 'write', expires: Date.now() + 900000, contentType
       });
       uploadUrls.push({ index: i, url });
     }
     return res.json({ uploadUrls, filePaths: generatedPaths, sessionId });
   }
 
-  // 3. Main Processing Job
-  if (!filePaths || !postId) {
-    return res.status(400).json({ error: "Missing filePaths or postId" });
+  // 3. Generate Upload URL (pre-edited: single file)
+  if (action === 'getUploadUrl') {
+    if (!sessionId || !fileType) return res.status(400).json({ error: "Missing sessionId or fileType" });
+    const ext = fileType.split('/')[1] || 'mp4';
+    const fileName = `${sessionId}/pre_source.${ext}`;
+    const [url] = await cacheBucket.file(fileName).getSignedUrl({
+      version: 'v4', action: 'write', expires: Date.now() + 900000, contentType: fileType
+    });
+    return res.json({ uploadUrl: url, filePath: fileName });
   }
 
-  const tempFiles = [];
-  try {
-    // A. Start - Create Status File
-    await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
-    const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
-    
-    // B. Download
-    const local = await Promise.all(filePaths.map(async (fp, i) => {
-      const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
-      await cacheBucket.file(fp).download({ destination: p });
-      tempFiles.push(p); return p;
-    }));
-
-    // C. Render Segments
-    const processed = [];
-    for (let i = 0; i < local.length; i++) {
-      // Update progress occasionally
-      const prog = 10 + Math.floor((i / local.length) * 60);
-      await updateStatusFile(postId, 'PROCESSING', { progress: prog });
-
-      const out = `/tmp/proc_${i}_${uuidv4()}.mp4`, ov = `/tmp/ov_${i}_${uuidv4()}.png`;
-      tempFiles.push(out, ov);
-      const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
-      fs.writeFileSync(ov, canvas.toBuffer('image/png'));
-
-      await new Promise((resolve, reject) => {
-        const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
-        const proc = spawn('ffmpeg', [
-          '-i', local[i], '-i', ov, 
-          '-filter_complex', filter, 
-          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', 
-          '-movflags', '+faststart', '-y', out
-        ]);
-        proc.on('error', reject);
-        proc.on('close', c => c === 0 ? resolve() : reject(new Error(`FFmpeg error code ${c}`)));
-      });
-      processed.push(out);
+  // 4. Main Processing Job — route by videoMode
+  if (videoMode === 'pre-edited') {
+    if (!filePath || !postId || !timestamps || !Array.isArray(timestamps) || timestamps.length === 0) {
+      return res.status(400).json({ error: "Missing filePath, postId, or timestamps" });
     }
-
-    // D. Stitch
-    await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
-    const final = `/tmp/f_${uuidv4()}.mp4`, list = `/tmp/l_${uuidv4()}.txt`;
-    tempFiles.push(final, list);
-    fs.writeFileSync(list, processed.map(p => `file '${p}'`).join('\n'));
-    
-    await new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-y', final]);
-      proc.on('error', reject);
-      proc.on('close', c => c === 0 ? resolve() : reject(new Error('Stitch failed')));
-    });
-
-    // E. Thumbnail & Upload
-    await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
-    const thumb = `/tmp/t_${uuidv4()}.jpg`;
-    tempFiles.push(thumb);
-    await generateThumbnail(final, thumb);
-
-    await Promise.all([
-      outputBucket.upload(final, { destination: `${postId}.mp4` }),
-      thumbnailBucket.upload(thumb, { destination: `${postId}.jpg`, metadata: { contentType: 'image/jpeg' } })
-    ]);
-
-    // F. SUCCESS: Notify Status File AND Database
-    await updateStatusFile(postId, 'READY', { progress: 100 });
-    await notifyWebsite(postId, 'READY', null, req);
-    
-    res.status(200).json({ status: 'SUCCESS' });
-    
-  } catch (error) {
-    console.error("Job Error:", error);
-    // Failure: Notify both
-    await updateStatusFile(postId, 'FAILED', { error: error.message });
-    await notifyWebsite(postId, 'FAILED', error.message, req);
-    res.status(500).json({ error: error.message });
-  } finally {
-    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
-    emojiCache.clear();
+    return processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime });
+  } else {
+    if (!filePaths || !postId) {
+      return res.status(400).json({ error: "Missing filePaths or postId" });
+    }
+    return processAutoStitch(req, res, { postId, title, ranks, filePaths });
   }
 });
