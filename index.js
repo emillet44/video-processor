@@ -193,6 +193,7 @@ function computeTitleBoxH(title) {
 }
 
 // Rendered once — title box + watermark, always visible for the full video.
+// No enable= expression needed; it overlays for the entire duration.
 async function createBaseOverlayImage(title) {
   const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, 1080, 1920);
@@ -390,8 +391,9 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
 
 // --- Pipeline: Pre-edited (single source file, timed text overlays) ---
 // The source video plays untouched. One base overlay (title + watermark) is
-// always visible. Each rank gets its own PNG, enabled from its timestamp to
-// endTime — so ranks stack up as the video progresses. Single FFmpeg pass.
+// always visible for the ENTIRE video duration — no enable= expression needed.
+// Each rank gets its own PNG, enabled from its timestamp to endTime so they
+// stack up as the video progresses, then all disappear together at endTime.
 async function processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime }) {
   const tempFiles = [];
   try {
@@ -412,11 +414,8 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     // Pre-calculate boxH once so rank overlays align with the base
     const { boxH } = computeTitleBoxH(title);
 
-    // Title fade-out: base overlay disappears 200ms before endTime so it fades
-    // with any fade-to-black rather than cutting off abruptly.
-    const titleEnd = Math.max(0, parsedEndTime - 0.2);
-
-    // Generate base overlay (title + watermark) — enabled from t=0 to titleEnd
+    // Generate base overlay (title + watermark).
+    // No enable= expression — it is composited for the full video duration.
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     fs.writeFileSync(basePath, (await createBaseOverlayImage(title)).toBuffer('image/png'));
@@ -437,10 +436,10 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     }
 
     // Build single FFmpeg pass:
-    //   [0:v]  scale+crop                                                   → [base_v]
-    //   [1:v]  base overlay (title+watermark), enable='between(t,0,titleEnd)' → [v_base]
-    //   [2:v]  rank N-1 PNG, enable='between(t, ts[0].time, endTime)'      → [v0]
-    //   [3:v]  rank N-2 PNG, enable='between(t, ts[1].time, endTime)'      → [v1]
+    //   [0:v]  scale+crop                                                    → [base_v]
+    //   [1:v]  base overlay (title+watermark), no enable= → always visible  → [v_base]
+    //   [2:v]  rank N-1 PNG, enable='between(t, ts[0].time, endTime)'       → [v0]
+    //   [3:v]  rank N-2 PNG, enable='between(t, ts[1].time, endTime)'       → [v1]
     //   ...rank 0 (highest priority / last revealed) at final timestamp
     await updateStatusFile(postId, 'PROCESSING', { progress: 65 });
 
@@ -453,7 +452,8 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const filterParts = [
       `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base_v]`,
       `[1:v]scale=1080:1920[base_ov]`,
-      `[base_v][base_ov]overlay=0:0:enable='between(t,0,${titleEnd})'[v_base]`,
+      // No enable= on the base overlay — title and watermark are always visible
+      `[base_v][base_ov]overlay=0:0[v_base]`,
     ];
     let prevLabel = 'v_base';
     for (let i = 0; i < rankPaths.length; i++) {
@@ -461,6 +461,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       const start = sortedTimestamps[timestampSlot]?.time ?? 0;
       const inputIdx = i + 2;
       filterParts.push(`[${inputIdx}:v]scale=1080:1920[r${i}]`);
+      // Each rank overlay is only active between its reveal timestamp and endTime
       filterParts.push(`[${prevLabel}][r${i}]overlay=0:0:enable='between(t,${start},${parsedEndTime})'[v${i}]`);
       prevLabel = `v${i}`;
     }
