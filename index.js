@@ -15,7 +15,7 @@ const LAYOUT_CONFIG = {
   fontPath: '/usr/share/fonts/truetype/custom/font.ttf',
   chineseFont: 'Noto Sans CJK SC',
   rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
-  titleFontSize: 100, titleLineSpacing: 60, titleBoxWidth: 980,
+  titleFontSize: 100, titleLineSpacing: 30, titleBoxWidth: 980,
   titleMaxLines: 2, titleBoxTopPadding: 30, titleBoxBottomPadding: 40,
   rankFontSize: 60, rankSpacing: 140, rankPaddingY: 80, rankNumX: 45,
   rankTextX: 125, rankBoxWidth: 830, rankMaxLines: 1,
@@ -363,48 +363,54 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     // Pre-calculate boxH once so rank overlays align with the base
     const { boxH } = computeTitleBoxH(title);
 
-    // Generate base overlay (title + watermark) — rendered once, always on
+    // Title fade-out: base overlay disappears 200ms before endTime so it fades
+    // with any fade-to-black rather than cutting off abruptly.
+    const titleEnd = Math.max(0, parsedEndTime - 0.2);
+
+    // Generate base overlay (title + watermark) — enabled from t=0 to titleEnd
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     fs.writeFileSync(basePath, (await createBaseOverlayImage(title)).toBuffer('image/png'));
 
-    // Generate one PNG per rank — each draws only that single rank entry.
-    // Because overlays accumulate in the filter chain and each is enabled from
-    // its timestamp to endTime, they stack up visually as the video progresses.
+    // Rank reveal order: highest rank index appears first (most suspense).
+    // sortedTimestamps[0] is the earliest mark → assign to the last rank (parsedRanks.length - 1),
+    // sortedTimestamps[1] → second-to-last rank, etc.
+    // Each rank stays visible from its assigned timestamp until endTime so they accumulate.
     const rankPaths = [];
     for (let i = 0; i < parsedRanks.length; i++) {
       await updateStatusFile(postId, 'PROCESSING', { progress: 25 + Math.floor((i / parsedRanks.length) * 35) });
       const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
       tempFiles.push(rankPath);
-      fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, i, boxH)).toBuffer('image/png'));
-      rankPaths.push(rankPath);
+      // Reverse: timestamp slot 0 → last rank, slot 1 → second-to-last, etc.
+      const rankIndex = parsedRanks.length - 1 - i;
+      fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, rankIndex, boxH)).toBuffer('image/png'));
+      rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
     }
 
     // Build single FFmpeg pass:
-    //   [0:v]  scale+crop                                      → [base_v]
-    //   [1:v]  base overlay (title+watermark), no enable       → [v_base]
-    //   [2:v]  rank 0, enable='between(t, r0.time, endTime)'  → [v0]
-    //   [3:v]  rank 1, enable='between(t, r1.time, endTime)'  → [v1]
-    //   ...each rank stays visible from its timestamp to endTime, stacking up
+    //   [0:v]  scale+crop                                                   → [base_v]
+    //   [1:v]  base overlay (title+watermark), enable='between(t,0,titleEnd)' → [v_base]
+    //   [2:v]  rank N-1 PNG, enable='between(t, ts[0].time, endTime)'      → [v0]
+    //   [3:v]  rank N-2 PNG, enable='between(t, ts[1].time, endTime)'      → [v1]
+    //   ...rank 0 (highest priority / last revealed) at final timestamp
     await updateStatusFile(postId, 'PROCESSING', { progress: 65 });
 
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
     tempFiles.push(finalPath);
 
-    // Inputs: source, base overlay, then one per rank
     const inputArgs = ['-i', sourcePath, '-i', basePath];
-    for (const rankPath of rankPaths) inputArgs.push('-i', rankPath);
+    for (const { path } of rankPaths) inputArgs.push('-i', path);
 
     const filterParts = [
       `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base_v]`,
       `[1:v]scale=1080:1920[base_ov]`,
-      `[base_v][base_ov]overlay=0:0[v_base]`,
+      `[base_v][base_ov]overlay=0:0:enable='between(t,0,${titleEnd})'[v_base]`,
     ];
     let prevLabel = 'v_base';
-    for (let i = 0; i < parsedRanks.length; i++) {
-      const ts = sortedTimestamps.find(t => t.rankIndex === i);
-      const start = ts ? ts.time : 0;
-      const inputIdx = i + 2; // 0=source, 1=base, 2+=ranks
+    for (let i = 0; i < rankPaths.length; i++) {
+      const { timestampSlot } = rankPaths[i];
+      const start = sortedTimestamps[timestampSlot]?.time ?? 0;
+      const inputIdx = i + 2;
       filterParts.push(`[${inputIdx}:v]scale=1080:1920[r${i}]`);
       filterParts.push(`[${prevLabel}][r${i}]overlay=0:0:enable='between(t,${start},${parsedEndTime})'[v${i}]`);
       prevLabel = `v${i}`;
