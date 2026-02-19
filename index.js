@@ -239,6 +239,8 @@ async function createRankOverlayImage(ranks, rankIndex, boxH) {
   return canvas;
 }
 
+
+
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
@@ -256,61 +258,69 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
 }
 
 async function generateThumbnail(videoPath, outputPath) {
+  return spawnWithTimeout('ffmpeg', [
+    '-i', videoPath, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', outputPath
+  ], 30_000, 'Thumbnail');
+}
+
+// --- Shared helpers ---
+
+// Wraps spawn() with a hard timeout — kills the process and rejects if it
+// doesn't finish within `ms`. Prevents silent FFmpeg hangs from stalling forever.
+function spawnWithTimeout(cmd, args, ms, label = 'Process') {
   return new Promise((resolve, reject) => {
-    const args = ['-i', videoPath, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', outputPath];
-    const proc = spawn('ffmpeg', args);
+    const proc = spawn(cmd, args);
     let stderr = '';
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
     proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Thumbnail failed: ${code} ${stderr}`)));
+    proc.on('close', code => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error(`${label} failed (${code}): ${stderr.slice(-400)}`));
+    });
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      reject(new Error(`${label} timed out after ${ms / 1000}s`));
+    }, ms);
   });
 }
 
-// --- Shared: Composite overlay PNG onto a video clip ---
+// Wraps GCS file.download() with a hard timeout.
+function downloadWithTimeout(gcsFile, destination, ms, label = 'Download') {
+  return Promise.race([
+    gcsFile.download({ destination }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+    )
+  ]);
+}
+
+// Composite overlay PNG onto a video clip
 function applyOverlay(inputPath, overlayPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
-    const proc = spawn('ffmpeg', [
-      '-i', inputPath, '-i', overlayPath,
-      '-filter_complex', filter,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac',
-      '-movflags', '+faststart', '-y', outputPath
-    ]);
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Overlay failed (${code}): ${stderr.slice(-300)}`)));
-  });
+  const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
+  return spawnWithTimeout('ffmpeg', [
+    '-i', inputPath, '-i', overlayPath,
+    '-filter_complex', filter,
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac',
+    '-movflags', '+faststart', '-y', outputPath
+  ], 300_000, 'Overlay');
 }
 
-// --- Shared: Stitch a list of clips into one file ---
+// Stitch a list of clips into one file
 function stitchClips(listPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', ['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath]);
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Stitch failed (${code}): ${stderr.slice(-300)}`)));
-  });
+  return spawnWithTimeout('ffmpeg', [
+    '-f', 'concat', '-safe', '0', '-i', listPath,
+    '-c', 'copy', '-movflags', '+faststart', '-y', outputPath
+  ], 120_000, 'Stitch');
 }
 
-// --- Pre-edited only: Cut a segment from a source file ---
+// Cut a segment from a source file (pre-edited pipeline only)
 function cutSegment(sourcePath, startSec, endSec, outputPath) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', [
-      '-ss', String(startSec),
-      '-i', sourcePath,
-      '-t', String(endSec - startSec),
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      '-y', outputPath
-    ]);
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Cut failed (${code}): ${stderr.slice(-300)}`)));
-  });
+  return spawnWithTimeout('ffmpeg', [
+    '-ss', String(startSec), '-i', sourcePath,
+    '-t', String(endSec - startSec),
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+    '-c:a', 'aac', '-movflags', '+faststart', '-y', outputPath
+  ], 300_000, 'Cut');
 }
 
 // --- Pipeline: Auto-stitch (N separate uploaded clips) ---
@@ -323,7 +333,7 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
     // Download all clips
     const local = await Promise.all(filePaths.map(async (fp, i) => {
       const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
-      await cacheBucket.file(fp).download({ destination: p });
+      await downloadWithTimeout(cacheBucket.file(fp), p, 120_000, `Download clip ${i}`);
       tempFiles.push(p);
       return p;
     }));
@@ -392,7 +402,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     // Download source file
     await updateStatusFile(postId, 'PROCESSING', { progress: 10 });
     const sourcePath = `/tmp/source_${uuidv4()}${path.extname(filePath) || '.mp4'}`;
-    await cacheBucket.file(filePath).download({ destination: sourcePath });
+    await downloadWithTimeout(cacheBucket.file(filePath), sourcePath, 120_000, 'Download source');
     tempFiles.push(sourcePath);
 
     // Build overlay states — now we only need the timestamps, no ranksToShow state
@@ -455,22 +465,16 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       prevLabel = `v${i}`;
     }
 
-    await new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', [
-        ...inputArgs,
-        '-filter_complex', filterParts.join(';'),
-        '-map', `[${prevLabel}]`,
-        '-map', '0:a?',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-        '-c:a', 'aac',
-        '-movflags', '+faststart',
-        '-y', finalPath
-      ]);
-      let stderr = '';
-      proc.stderr.on('data', d => { stderr += d.toString(); });
-      proc.on('error', reject);
-      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`FFmpeg overlay failed (${code}): ${stderr.slice(-500)}`)));
-    });
+    await spawnWithTimeout('ffmpeg', [
+      ...inputArgs,
+      '-filter_complex', filterParts.join(';'),
+      '-map', `[${prevLabel}]`,
+      '-map', '0:a?',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+      '-c:a', 'aac',
+      '-movflags', '+faststart',
+      '-y', finalPath
+    ], 600_000, 'Pre-edited overlay');
 
     // Thumbnail & upload
     await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
