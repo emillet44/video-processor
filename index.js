@@ -141,14 +141,24 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
   }
 }
 
-async function createTextOverlayImage(title, ranks, ranksToShow) {
+// --- Pre-edited overlay helpers ---
+
+// Shared helper: computes title box height so rank positioning is consistent
+// between the base overlay and the per-rank overlays.
+function computeTitleBoxH(title) {
+  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
+  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
+  return { titleRes, boxH: LAYOUT_CONFIG.titleBoxTopPadding + textH + LAYOUT_CONFIG.titleBoxBottomPadding };
+}
+
+// Rendered once — title box + watermark, always visible for the full video.
+async function createBaseOverlayImage(title) {
   const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, 1080, 1920);
   ctx.textBaseline = 'top'; ctx.textAlign = 'left';
 
-  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
+  const { titleRes, boxH } = computeTitleBoxH(title);
   const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
-  const boxH = LAYOUT_CONFIG.titleBoxTopPadding + textH + LAYOUT_CONFIG.titleBoxBottomPadding;
 
   ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 1080, boxH);
   let currY = (boxH - textH) / 2;
@@ -156,20 +166,6 @@ async function createTextOverlayImage(title, ranks, ranksToShow) {
     const lw = measureMixedText(ctx, line, titleRes.fontSize);
     await drawMixedText(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, 'white');
     currY += titleRes.fontSize + LAYOUT_CONFIG.titleLineSpacing;
-  }
-
-  for (let i = 0; i < ranksToShow; i++) {
-    const idx = (ranks.length - ranksToShow) + i;
-    const y = LAYOUT_CONFIG.rankPaddingY + boxH + (idx * LAYOUT_CONFIG.rankSpacing);
-    const rRes = fitTextToBox(ranks[idx], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
-
-    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
-    ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-    ctx.strokeText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-    ctx.fillStyle = LAYOUT_CONFIG.rankColors[idx] || 'white';
-    ctx.fillText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-
-    await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
   }
 
   const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
@@ -180,6 +176,29 @@ async function createTextOverlayImage(title, ranks, ranksToShow) {
 
   return canvas;
 }
+
+// Rendered once per rank — draws only that single rank entry, positioned
+// using the pre-calculated boxH so it lines up with the base overlay.
+async function createRankOverlayImage(ranks, rankIndex, boxH) {
+  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 1080, 1920);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
+  const y = LAYOUT_CONFIG.rankPaddingY + boxH + (rankIndex * LAYOUT_CONFIG.rankSpacing);
+  const rRes = fitTextToBox(ranks[rankIndex], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
+
+  ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
+  ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
+  ctx.strokeText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+  ctx.fillStyle = LAYOUT_CONFIG.rankColors[rankIndex] || 'white';
+  ctx.fillText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+
+  await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+
+  return canvas;
+}
+
+
 
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
@@ -321,23 +340,14 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
 }
 
 // --- Pipeline: Pre-edited (single source file, timed text overlays) ---
-// The source video plays untouched. Rank text appears at each rank timestamp
-// and all rank text disappears at endTime. Title is visible the full duration.
-//
-// Generates one PNG per overlay state:
-//   state 0: title only             (t=0 → first rank timestamp)
-//   state 1: title + rank 1         (rank1.time → rank2.time)
-//   state 2: title + rank 1+2       (rank2.time → rank3.time)
-//   ...
-//   state N: title + all ranks      (rankN.time → endTime)
-// After endTime all overlays are disabled and the raw video shows through.
-// All states are chained in a single FFmpeg filter_complex pass — no cutting or stitching.
+// The source video plays untouched. One base overlay (title + watermark) is
+// always visible. Each rank gets its own PNG, enabled from its timestamp to
+// endTime — so ranks stack up as the video progresses. Single FFmpeg pass.
 async function processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime }) {
   const tempFiles = [];
   try {
     await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
-    const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
     const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
 
     // Download source file
@@ -346,53 +356,57 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     await cacheBucket.file(filePath).download({ destination: sourcePath });
     tempFiles.push(sourcePath);
 
-    // Build overlay states
+    // Build overlay states — now we only need the timestamps, no ranksToShow state
     await updateStatusFile(postId, 'PROCESSING', { progress: 20 });
-    const overlayStates = [
-      // State 0: title only, before any rank appears
-      { ranksToShow: 0, start: 0, end: sortedTimestamps[0].time }
-    ];
-    for (let i = 0; i < sortedTimestamps.length; i++) {
-      overlayStates.push({
-        ranksToShow: i + 1,
-        start: sortedTimestamps[i].time,
-        end: i < sortedTimestamps.length - 1 ? sortedTimestamps[i + 1].time : parsedEndTime
-      });
+    const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
+
+    // Pre-calculate boxH once so rank overlays align with the base
+    const { boxH } = computeTitleBoxH(title);
+
+    // Generate base overlay (title + watermark) — rendered once, always on
+    const basePath = `/tmp/base_${uuidv4()}.png`;
+    tempFiles.push(basePath);
+    fs.writeFileSync(basePath, (await createBaseOverlayImage(title)).toBuffer('image/png'));
+
+    // Generate one PNG per rank — each draws only that single rank entry.
+    // Because overlays accumulate in the filter chain and each is enabled from
+    // its timestamp to endTime, they stack up visually as the video progresses.
+    const rankPaths = [];
+    for (let i = 0; i < parsedRanks.length; i++) {
+      await updateStatusFile(postId, 'PROCESSING', { progress: 25 + Math.floor((i / parsedRanks.length) * 35) });
+      const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
+      tempFiles.push(rankPath);
+      fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, i, boxH)).toBuffer('image/png'));
+      rankPaths.push(rankPath);
     }
 
-    // Generate one PNG per state
-    const ovPaths = [];
-    for (let i = 0; i < overlayStates.length; i++) {
-      await updateStatusFile(postId, 'PROCESSING', { progress: 20 + Math.floor((i / overlayStates.length) * 40) });
-      const ovPath = `/tmp/ov_${i}_${uuidv4()}.png`;
-      tempFiles.push(ovPath);
-      const canvas = await createTextOverlayImage(title, parsedRanks, overlayStates[i].ranksToShow);
-      fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
-      ovPaths.push(ovPath);
-    }
-
-    // Build single FFmpeg pass with all overlays time-gated via enable expressions.
-    // Filter graph:
-    //   [0:v] scale+crop → [base]
-    //   [1:v] scale → [ov0];  [base][ov0] overlay enable='between(t,s0,e0)' → [v0]
-    //   [2:v] scale → [ov1];  [v0][ov1]   overlay enable='between(t,s1,e1)' → [v1]
-    //   ...final map → [vN]
+    // Build single FFmpeg pass:
+    //   [0:v]  scale+crop                                      → [base_v]
+    //   [1:v]  base overlay (title+watermark), no enable       → [v_base]
+    //   [2:v]  rank 0, enable='between(t, r0.time, endTime)'  → [v0]
+    //   [3:v]  rank 1, enable='between(t, r1.time, endTime)'  → [v1]
+    //   ...each rank stays visible from its timestamp to endTime, stacking up
     await updateStatusFile(postId, 'PROCESSING', { progress: 65 });
 
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
     tempFiles.push(finalPath);
 
-    const inputArgs = ['-i', sourcePath];
-    for (const ovPath of ovPaths) inputArgs.push('-i', ovPath);
+    // Inputs: source, base overlay, then one per rank
+    const inputArgs = ['-i', sourcePath, '-i', basePath];
+    for (const rankPath of rankPaths) inputArgs.push('-i', rankPath);
 
     const filterParts = [
-      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base]`
+      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base_v]`,
+      `[1:v]scale=1080:1920[base_ov]`,
+      `[base_v][base_ov]overlay=0:0[v_base]`,
     ];
-    let prevLabel = 'base';
-    for (let i = 0; i < overlayStates.length; i++) {
-      const { start, end } = overlayStates[i];
-      filterParts.push(`[${i + 1}:v]scale=1080:1920[ov${i}]`);
-      filterParts.push(`[${prevLabel}][ov${i}]overlay=0:0:enable='between(t,${start},${end})'[v${i}]`);
+    let prevLabel = 'v_base';
+    for (let i = 0; i < parsedRanks.length; i++) {
+      const ts = sortedTimestamps.find(t => t.rankIndex === i);
+      const start = ts ? ts.time : 0;
+      const inputIdx = i + 2; // 0=source, 1=base, 2+=ranks
+      filterParts.push(`[${inputIdx}:v]scale=1080:1920[r${i}]`);
+      filterParts.push(`[${prevLabel}][r${i}]overlay=0:0:enable='between(t,${start},${parsedEndTime})'[v${i}]`);
       prevLabel = `v${i}`;
     }
 
