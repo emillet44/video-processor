@@ -320,7 +320,18 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
   }
 }
 
-// --- Pipeline: Pre-edited (single source file, cut by timestamps) ---
+// --- Pipeline: Pre-edited (single source file, timed text overlays) ---
+// The source video plays untouched. Rank text appears at each rank timestamp
+// and all rank text disappears at endTime. Title is visible the full duration.
+//
+// Generates one PNG per overlay state:
+//   state 0: title only             (t=0 → first rank timestamp)
+//   state 1: title + rank 1         (rank1.time → rank2.time)
+//   state 2: title + rank 1+2       (rank2.time → rank3.time)
+//   ...
+//   state N: title + all ranks      (rankN.time → endTime)
+// After endTime all overlays are disabled and the raw video shows through.
+// All states are chained in a single FFmpeg filter_complex pass — no cutting or stitching.
 async function processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime }) {
   const tempFiles = [];
   try {
@@ -335,42 +346,72 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     await cacheBucket.file(filePath).download({ destination: sourcePath });
     tempFiles.push(sourcePath);
 
-    // Cut, overlay each segment
-    const processed = [];
+    // Build overlay states
+    await updateStatusFile(postId, 'PROCESSING', { progress: 20 });
+    const overlayStates = [
+      // State 0: title only, before any rank appears
+      { ranksToShow: 0, start: 0, end: sortedTimestamps[0].time }
+    ];
     for (let i = 0; i < sortedTimestamps.length; i++) {
-      const prog = 15 + Math.floor((i / sortedTimestamps.length) * 60);
-      await updateStatusFile(postId, 'PROCESSING', { progress: prog });
-
-      const segStart = sortedTimestamps[i].time;
-      const segEnd = i < sortedTimestamps.length - 1
-        ? sortedTimestamps[i + 1].time
-        : parsedEndTime;
-
-      if (segEnd === undefined || segEnd === null || segEnd <= segStart) {
-        throw new Error(`Invalid segment bounds for rank ${i + 1}: ${segStart} → ${segEnd}`);
-      }
-
-      const cutPath = `/tmp/cut_${i}_${uuidv4()}.mp4`;
-      const ovPath  = `/tmp/ov_${i}_${uuidv4()}.png`;
-      const outPath = `/tmp/proc_${i}_${uuidv4()}.mp4`;
-      tempFiles.push(cutPath, ovPath, outPath);
-
-      await cutSegment(sourcePath, segStart, segEnd, cutPath);
-
-      const ranksToShow = sortedTimestamps[i].rankIndex + 1;
-      const canvas = await createTextOverlayImage(title, parsedRanks, ranksToShow);
-      fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
-      await applyOverlay(cutPath, ovPath, outPath);
-      processed.push(outPath);
+      overlayStates.push({
+        ranksToShow: i + 1,
+        start: sortedTimestamps[i].time,
+        end: i < sortedTimestamps.length - 1 ? sortedTimestamps[i + 1].time : parsedEndTime
+      });
     }
 
-    // Stitch
-    await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
-    const listPath  = `/tmp/l_${uuidv4()}.txt`;
+    // Generate one PNG per state
+    const ovPaths = [];
+    for (let i = 0; i < overlayStates.length; i++) {
+      await updateStatusFile(postId, 'PROCESSING', { progress: 20 + Math.floor((i / overlayStates.length) * 40) });
+      const ovPath = `/tmp/ov_${i}_${uuidv4()}.png`;
+      tempFiles.push(ovPath);
+      const canvas = await createTextOverlayImage(title, parsedRanks, overlayStates[i].ranksToShow);
+      fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
+      ovPaths.push(ovPath);
+    }
+
+    // Build single FFmpeg pass with all overlays time-gated via enable expressions.
+    // Filter graph:
+    //   [0:v] scale+crop → [base]
+    //   [1:v] scale → [ov0];  [base][ov0] overlay enable='between(t,s0,e0)' → [v0]
+    //   [2:v] scale → [ov1];  [v0][ov1]   overlay enable='between(t,s1,e1)' → [v1]
+    //   ...final map → [vN]
+    await updateStatusFile(postId, 'PROCESSING', { progress: 65 });
+
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
-    tempFiles.push(listPath, finalPath);
-    fs.writeFileSync(listPath, processed.map(p => `file '${p}'`).join('\n'));
-    await stitchClips(listPath, finalPath);
+    tempFiles.push(finalPath);
+
+    const inputArgs = ['-i', sourcePath];
+    for (const ovPath of ovPaths) inputArgs.push('-i', ovPath);
+
+    const filterParts = [
+      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base]`
+    ];
+    let prevLabel = 'base';
+    for (let i = 0; i < overlayStates.length; i++) {
+      const { start, end } = overlayStates[i];
+      filterParts.push(`[${i + 1}:v]scale=1080:1920[ov${i}]`);
+      filterParts.push(`[${prevLabel}][ov${i}]overlay=0:0:enable='between(t,${start},${end})'[v${i}]`);
+      prevLabel = `v${i}`;
+    }
+
+    await new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', [
+        ...inputArgs,
+        '-filter_complex', filterParts.join(';'),
+        '-map', `[${prevLabel}]`,
+        '-map', '0:a?',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+        '-c:a', 'aac',
+        '-movflags', '+faststart',
+        '-y', finalPath
+      ]);
+      let stderr = '';
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+      proc.on('error', reject);
+      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`FFmpeg overlay failed (${code}): ${stderr.slice(-500)}`)));
+    });
 
     // Thumbnail & upload
     await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
