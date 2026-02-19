@@ -141,6 +141,47 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
   }
 }
 
+// Used by the auto-stitch pipeline — renders title, all revealed ranks so far, and watermark.
+async function createTextOverlayImage(title, ranks, ranksToShow) {
+  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 1080, 1920);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
+  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
+  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
+  const boxH = LAYOUT_CONFIG.titleBoxTopPadding + textH + LAYOUT_CONFIG.titleBoxBottomPadding;
+
+  ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 1080, boxH);
+  let currY = (boxH - textH) / 2;
+  for (const line of titleRes.lines) {
+    const lw = measureMixedText(ctx, line, titleRes.fontSize);
+    await drawMixedText(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, 'white');
+    currY += titleRes.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+  }
+
+  for (let i = 0; i < ranksToShow; i++) {
+    const idx = (ranks.length - ranksToShow) + i;
+    const y = LAYOUT_CONFIG.rankPaddingY + boxH + (idx * LAYOUT_CONFIG.rankSpacing);
+    const rRes = fitTextToBox(ranks[idx], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
+
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
+    ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
+    ctx.strokeText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+    ctx.fillStyle = LAYOUT_CONFIG.rankColors[idx] || 'white';
+    ctx.fillText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+
+    await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+  }
+
+  const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
+  ctx.save();
+  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity;
+  await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+  ctx.restore();
+
+  return canvas;
+}
+
 // --- Pre-edited overlay helpers ---
 
 // Shared helper: computes title box height so rank positioning is consistent
@@ -197,8 +238,6 @@ async function createRankOverlayImage(ranks, rankIndex, boxH) {
 
   return canvas;
 }
-
-
 
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
