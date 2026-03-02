@@ -11,24 +11,123 @@ const cacheBucket = storage.bucket('ranktop-v-cache');
 const outputBucket = storage.bucket('ranktop-v');
 const thumbnailBucket = storage.bucket('ranktop-v-thumb');
 
-const LAYOUT_CONFIG = {
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT CONFIG — default values used when no custom layoutConfig is passed
+// from the client. Clients can override any/all of these fields.
+// ─────────────────────────────────────────────────────────────────────────────
+const DEFAULT_LAYOUT_CONFIG = {
   fontPath: '/usr/share/fonts/truetype/custom/font.ttf',
   chineseFont: 'Noto Sans CJK SC',
   rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
-  titleFontSize: 100, titleLineSpacing: 30, titleBoxWidth: 980,
-  titleMaxLines: 2, titleBoxTopPadding: 30, titleBoxBottomPadding: 40,
-  rankFontSize: 60, rankSpacing: 140, rankPaddingY: 80, rankNumX: 45,
-  rankTextX: 125, rankBoxWidth: 830, rankMaxLines: 1,
-  watermarkText: 'ranktop.net', watermarkFontSize: 48, watermarkPadding: 20, watermarkOpacity: 0.6,
-  textOutlineWidth: 12
+
+  // Title box
+  titleFontSize: 100,
+  titleLineSpacing: 30,
+  titleBoxWidth: 980,
+  titleMaxLines: 2,
+  titleBoxTopPadding: 30,
+  titleBoxBottomPadding: 40,
+
+  // Title backdrop: 'black' | 'white' | 'blurred'
+  titleBackdrop: 'black',
+
+  // Title word coloring — array of { word, color } pairs.
+  // Words not listed here render in white (or black if backdrop is white).
+  // Example: [{ word: 'BEST', color: '#FFD700' }, { word: 'WORST', color: '#FF4444' }]
+  titleWordColors: [],
+
+  // Default title text color (used for words not in titleWordColors)
+  titleDefaultColor: 'white',
+
+  // Subtitle — small line of text below the title (e.g. "subscribe!" or "the last one is crazy!")
+  subtitle: '',
+  subtitleFontSize: 44,
+  subtitleColor: '#CCCCCC',
+  subtitleTopMargin: 10, // gap between title bottom and subtitle
+
+  // Rank entries
+  rankFontSize: 60,
+  rankSpacing: 140,
+  rankPaddingY: 80,
+  rankNumX: 45,
+  rankTextX: 125,
+  rankBoxWidth: 830,
+  rankMaxLines: 1,
+
+  // Text rendering
+  textOutlineWidth: 18,
+  shadowBlur: 25,
+  shadowColor: 'rgba(0,0,0,0.8)',
+
+  // Ranktop watermark (bottom-right)
+  watermarkText: 'ranktop.net',
+  watermarkFontSize: 48,
+  watermarkPadding: 20,
+  watermarkOpacity: 0.6,
+
+  // Creator watermark (bottom-center) — leave empty to disable
+  creatorWatermark: '',
+  creatorWatermarkFontSize: 44,
+  creatorWatermarkOpacity: 0.7,
+  creatorWatermarkColor: 'white',
+  creatorWatermarkBottomPadding: 80, // distance from very bottom
+
+  // Style preset: 'default' | 'viral' | 'minimal' | 'dark'
+  // Preset values are applied first; individual fields above then override.
+  stylePreset: 'default',
 };
 
-const emojiCache = new Map();
-if (fs.existsSync(LAYOUT_CONFIG.fontPath)) {
-  registerFont(LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
+// ─────────────────────────────────────────────────────────────────────────────
+// STYLE PRESETS — merged over DEFAULT_LAYOUT_CONFIG when stylePreset is set.
+// ─────────────────────────────────────────────────────────────────────────────
+const STYLE_PRESETS = {
+  default: {},
+  viral: {
+    titleBackdrop: 'black',
+    textOutlineWidth: 22,
+    shadowBlur: 35,
+    shadowColor: 'rgba(0,0,0,0.9)',
+    rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', '#FF6B6B', '#FF6B6B'],
+    subtitleColor: '#FFD700',
+  },
+  minimal: {
+    titleBackdrop: 'white',
+    titleDefaultColor: 'black',
+    textOutlineWidth: 0,
+    shadowBlur: 0,
+    shadowColor: 'rgba(0,0,0,0)',
+    rankColors: ['#222222', '#444444', '#666666', '#888888', '#888888'],
+    watermarkOpacity: 0.3,
+    subtitleColor: '#555555',
+  },
+  dark: {
+    titleBackdrop: 'black',
+    titleDefaultColor: 'white',
+    textOutlineWidth: 14,
+    shadowBlur: 30,
+    shadowColor: 'rgba(0,0,0,1)',
+    subtitleColor: '#AAAAAA',
+  },
+};
+
+// Build the effective layout config by merging: defaults → preset → client overrides
+function resolveLayoutConfig(clientConfig = {}) {
+  const preset = clientConfig.stylePreset || DEFAULT_LAYOUT_CONFIG.stylePreset;
+  const presetOverrides = STYLE_PRESETS[preset] || {};
+  return { ...DEFAULT_LAYOUT_CONFIG, ...presetOverrides, ...clientConfig };
 }
 
-// --- Status Management ---
+// Module-level config — replaced per-request in the HTTP handler
+let LAYOUT_CONFIG = resolveLayoutConfig();
+
+const emojiCache = new Map();
+if (fs.existsSync(DEFAULT_LAYOUT_CONFIG.fontPath)) {
+  registerFont(DEFAULT_LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Status Management
+// ─────────────────────────────────────────────────────────────────────────────
 async function updateStatusFile(postId, status, payload = {}) {
   try {
     const file = outputBucket.file(`${postId}.json`);
@@ -43,7 +142,9 @@ async function updateStatusFile(postId, status, payload = {}) {
   }
 }
 
-// --- Database Webhook ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Database Webhook
+// ─────────────────────────────────────────────────────────────────────────────
 async function notifyWebsite(postId, status, errorMessage = null, req = null) {
   let baseUrl = "https://ranktop.net";
   if (req && req.headers['x-callback-url']) {
@@ -65,7 +166,9 @@ async function notifyWebsite(postId, status, errorMessage = null, req = null) {
   }
 }
 
-// --- Utilities ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────────────
 function getEmojiUrl(emoji) {
   const codePoints = Array.from(emoji).map(c => c.codePointAt(0).toString(16)).join('-');
   return `https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.0.3/assets/72x72/${codePoints}.png`;
@@ -120,10 +223,7 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
         try {
           const url = getEmojiUrl(emoji);
           let img = emojiCache.get(url);
-          if (!img) {
-            img = await loadImage(url);
-            emojiCache.set(url, img);
-          }
+          if (!img) { img = await loadImage(url); emojiCache.set(url, img); }
           ctx.drawImage(img, currentX, y + (fontSize * 0.1), fontSize, fontSize);
         } catch (e) { console.warn(`Emoji Load Failed: ${emoji}`); }
         currentX += fontSize;
@@ -131,7 +231,8 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
     } else {
       ctx.font = `${fontSize}px "${s.font}"`;
       if (strokeStyle && lineWidth > 0) {
-        ctx.strokeStyle = strokeStyle; ctx.lineWidth = lineWidth;
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
         ctx.strokeText(s.text, currentX, y);
       }
       ctx.fillStyle = fillStyle;
@@ -141,107 +242,110 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle =
   }
 }
 
-// Used by the auto-stitch pipeline — renders title, all revealed ranks so far, and watermark.
-async function createTextOverlayImage(title, ranks, ranksToShow) {
-  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, 1080, 1920);
-  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-word colored title drawing
+//
+// titleWordColors is an array of { word, color } objects. Words are matched
+// case-insensitively against each whitespace-delimited token in the line.
+// Unmatched words use titleDefaultColor.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildWordColorMap(wordColors) {
+  const map = new Map();
+  for (const { word, color } of (wordColors || [])) {
+    map.set(word.toLowerCase(), color);
+  }
+  return map;
+}
 
-  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
-  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
-  const boxH = LAYOUT_CONFIG.titleBoxTopPadding + textH + LAYOUT_CONFIG.titleBoxBottomPadding;
+async function drawColoredTitleLine(ctx, line, x, y, fontSize) {
+  const wordColorMap = buildWordColorMap(LAYOUT_CONFIG.titleWordColors);
+  const outlineWidth = LAYOUT_CONFIG.textOutlineWidth;
+  const strokeColor = LAYOUT_CONFIG.titleBackdrop === 'white' ? 'rgba(255,255,255,0.6)' : 'black';
 
-  ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 1080, boxH);
-  let currY = (boxH - textH) / 2;
-  for (const line of titleRes.lines) {
-    const lw = measureMixedText(ctx, line, titleRes.fontSize);
-    await drawMixedText(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, 'white');
-    currY += titleRes.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+  // Apply shadow
+  ctx.shadowColor = LAYOUT_CONFIG.shadowColor;
+  ctx.shadowBlur = LAYOUT_CONFIG.shadowBlur;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  const words = line.split(' ');
+  let currentX = x;
+
+  for (let wi = 0; wi < words.length; wi++) {
+    const word = words[wi];
+    const color = wordColorMap.get(word.toLowerCase()) || LAYOUT_CONFIG.titleDefaultColor;
+    const displayWord = wi < words.length - 1 ? word + ' ' : word;
+    await drawMixedText(ctx, displayWord, currentX, y, fontSize, color, strokeColor, outlineWidth);
+    currentX += measureMixedText(ctx, displayWord, fontSize);
   }
 
-  for (let i = 0; i < ranksToShow; i++) {
-    const idx = (ranks.length - ranksToShow) + i;
-    const y = LAYOUT_CONFIG.rankPaddingY + boxH + (idx * LAYOUT_CONFIG.rankSpacing);
-    const rRes = fitTextToBox(ranks[idx], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
+  // Reset shadow
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'rgba(0,0,0,0)';
+}
 
-    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
-    ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-    ctx.strokeText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-    ctx.fillStyle = LAYOUT_CONFIG.rankColors[idx] || 'white';
-    ctx.fillText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-
-    await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+// ─────────────────────────────────────────────────────────────────────────────
+// Title backdrop rendering
+//
+// 'black' and 'white' are solid fills.
+// 'blurred' draws a semi-transparent dark gradient — FFmpeg handles the actual
+// blur of the underlying video frame; we just draw a darkened overlay so text
+// stays readable on any background.
+// ─────────────────────────────────────────────────────────────────────────────
+function drawTitleBackdrop(ctx, boxH) {
+  const backdrop = LAYOUT_CONFIG.titleBackdrop;
+  if (backdrop === 'black') {
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, 1080, boxH);
+  } else if (backdrop === 'white') {
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, 1080, boxH);
+  } else if (backdrop === 'blurred') {
+    // Semi-transparent dark gradient that blends with the video blur underneath
+    const grad = ctx.createLinearGradient(0, 0, 0, boxH);
+    grad.addColorStop(0, 'rgba(0,0,0,0.82)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 1080, boxH);
   }
+}
 
-  const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
+// ─────────────────────────────────────────────────────────────────────────────
+// Subtitle drawing — rendered immediately below the title text inside the box
+// ─────────────────────────────────────────────────────────────────────────────
+async function drawSubtitle(ctx, subtitleY) {
+  if (!LAYOUT_CONFIG.subtitle) return;
+  const subFontSize = LAYOUT_CONFIG.subtitleFontSize;
+  const subW = measureMixedText(ctx, LAYOUT_CONFIG.subtitle, subFontSize);
+  const subX = (1080 - subW) / 2;
+  const outlineColor = LAYOUT_CONFIG.titleBackdrop === 'white' ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.7)';
+  await drawMixedText(
+    ctx, LAYOUT_CONFIG.subtitle, subX, subtitleY, subFontSize,
+    LAYOUT_CONFIG.subtitleColor, outlineColor, LAYOUT_CONFIG.textOutlineWidth * 0.5
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Creator watermark — bottom-center
+// ─────────────────────────────────────────────────────────────────────────────
+async function drawCreatorWatermark(ctx) {
+  if (!LAYOUT_CONFIG.creatorWatermark) return;
+  const fontSize = LAYOUT_CONFIG.creatorWatermarkFontSize;
+  const wmW = measureMixedText(ctx, LAYOUT_CONFIG.creatorWatermark, fontSize);
+  const x = (1080 - wmW) / 2;
+  const y = 1920 - fontSize - LAYOUT_CONFIG.creatorWatermarkBottomPadding;
   ctx.save();
-  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity;
-  await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+  ctx.globalAlpha = LAYOUT_CONFIG.creatorWatermarkOpacity;
+  await drawMixedText(
+    ctx, LAYOUT_CONFIG.creatorWatermark, x, y, fontSize,
+    LAYOUT_CONFIG.creatorWatermarkColor, 'black', LAYOUT_CONFIG.textOutlineWidth * 0.6
+  );
   ctx.restore();
-
-  return canvas;
 }
 
-// --- Pre-edited overlay helpers ---
-
-// Shared helper: computes title box height so rank positioning is consistent
-// between the base overlay and the per-rank overlays.
-function computeTitleBoxH(title) {
-  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
-  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
-  return { titleRes, boxH: LAYOUT_CONFIG.titleBoxTopPadding + textH + LAYOUT_CONFIG.titleBoxBottomPadding };
-}
-
-// Rendered once — title box + watermark, always visible for the full video.
-// No enable= expression needed; it overlays for the entire duration.
-async function createBaseOverlayImage(title) {
-  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, 1080, 1920);
-  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
-
-  const { titleRes, boxH } = computeTitleBoxH(title);
-  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
-
-  ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 1080, boxH);
-  let currY = (boxH - textH) / 2;
-  for (const line of titleRes.lines) {
-    const lw = measureMixedText(ctx, line, titleRes.fontSize);
-    await drawMixedText(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, 'white');
-    currY += titleRes.fontSize + LAYOUT_CONFIG.titleLineSpacing;
-  }
-
-  const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
-  ctx.save();
-  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity;
-  await drawMixedText(ctx, LAYOUT_CONFIG.watermarkText, 1080 - wmW - LAYOUT_CONFIG.watermarkPadding, 1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding, LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
-  ctx.restore();
-
-  return canvas;
-}
-
-// Rendered once per rank — draws only that single rank entry, positioned
-// using the pre-calculated boxH so it lines up with the base overlay.
-async function createRankOverlayImage(ranks, rankIndex, boxH) {
-  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, 1080, 1920);
-  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
-
-  const y = LAYOUT_CONFIG.rankPaddingY + boxH + (rankIndex * LAYOUT_CONFIG.rankSpacing);
-  const rRes = fitTextToBox(ranks[rankIndex], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
-
-  ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
-  ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
-  ctx.strokeText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-  ctx.fillStyle = LAYOUT_CONFIG.rankColors[rankIndex] || 'white';
-  ctx.fillText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
-
-  await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
-
-  return canvas;
-}
-
-
-
+// ─────────────────────────────────────────────────────────────────────────────
+// fitTextToBox — unchanged
+// ─────────────────────────────────────────────────────────────────────────────
 function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   const canvas = createCanvas(boxWidth, 100);
   const ctx = canvas.getContext('2d');
@@ -258,16 +362,161 @@ function fitTextToBox(text, boxWidth, maxLines, initialFontSize) {
   return { fontSize: 10, lines: [text] };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// computeTitleBoxH — now accounts for optional subtitle height
+// ─────────────────────────────────────────────────────────────────────────────
+function computeTitleBoxH(title) {
+  const titleRes = fitTextToBox(title, LAYOUT_CONFIG.titleBoxWidth, LAYOUT_CONFIG.titleMaxLines, LAYOUT_CONFIG.titleFontSize);
+  const textH = (titleRes.lines.length * titleRes.fontSize) + ((titleRes.lines.length - 1) * LAYOUT_CONFIG.titleLineSpacing);
+  const subtitleH = LAYOUT_CONFIG.subtitle
+    ? LAYOUT_CONFIG.subtitleTopMargin + LAYOUT_CONFIG.subtitleFontSize
+    : 0;
+  const boxH = LAYOUT_CONFIG.titleBoxTopPadding + textH + subtitleH + LAYOUT_CONFIG.titleBoxBottomPadding;
+  return { titleRes, boxH, textH, subtitleH };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// drawTitleBlock — shared helper used by all overlay creators
+// Draws backdrop, title lines (with per-word coloring + shadow), subtitle,
+// and returns the bottom Y of the title box.
+// ─────────────────────────────────────────────────────────────────────────────
+async function drawTitleBlock(ctx, title) {
+  const { titleRes, boxH, textH } = computeTitleBoxH(title);
+
+  drawTitleBackdrop(ctx, boxH);
+
+  // Center title lines vertically within the non-subtitle portion
+  const subtitleH = LAYOUT_CONFIG.subtitle
+    ? LAYOUT_CONFIG.subtitleTopMargin + LAYOUT_CONFIG.subtitleFontSize
+    : 0;
+  const titleAreaH = boxH - subtitleH;
+  let currY = (titleAreaH - textH) / 2;
+
+  for (const line of titleRes.lines) {
+    const lw = measureMixedText(ctx, line, titleRes.fontSize);
+    const lineX = (1080 - lw) / 2;
+    await drawColoredTitleLine(ctx, line, lineX, currY, titleRes.fontSize);
+    currY += titleRes.fontSize + LAYOUT_CONFIG.titleLineSpacing;
+  }
+
+  // Subtitle sits just below the title text, still inside the box
+  if (LAYOUT_CONFIG.subtitle) {
+    await drawSubtitle(ctx, currY + LAYOUT_CONFIG.subtitleTopMargin);
+  }
+
+  return boxH;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// drawRantopWatermark — bottom-right, unchanged position
+// ─────────────────────────────────────────────────────────────────────────────
+async function drawRantopWatermark(ctx) {
+  const wmW = measureMixedText(ctx, LAYOUT_CONFIG.watermarkText, LAYOUT_CONFIG.watermarkFontSize);
+  ctx.save();
+  ctx.globalAlpha = LAYOUT_CONFIG.watermarkOpacity;
+  ctx.shadowColor = LAYOUT_CONFIG.shadowColor;
+  ctx.shadowBlur = LAYOUT_CONFIG.shadowBlur * 0.6;
+  await drawMixedText(
+    ctx, LAYOUT_CONFIG.watermarkText,
+    1080 - wmW - LAYOUT_CONFIG.watermarkPadding,
+    1920 - LAYOUT_CONFIG.watermarkFontSize - LAYOUT_CONFIG.watermarkPadding,
+    LAYOUT_CONFIG.watermarkFontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth
+  );
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// createTextOverlayImage — auto-stitch pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+async function createTextOverlayImage(title, ranks, ranksToShow) {
+  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 1080, 1920);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
+  const boxH = await drawTitleBlock(ctx, title);
+
+  for (let i = 0; i < ranksToShow; i++) {
+    const idx = (ranks.length - ranksToShow) + i;
+    const y = LAYOUT_CONFIG.rankPaddingY + boxH + (idx * LAYOUT_CONFIG.rankSpacing);
+    const rRes = fitTextToBox(ranks[idx], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
+
+    ctx.shadowColor = LAYOUT_CONFIG.shadowColor;
+    ctx.shadowBlur = LAYOUT_CONFIG.shadowBlur;
+    ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+
+    ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
+    ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
+    ctx.strokeText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+    ctx.fillStyle = LAYOUT_CONFIG.rankColors[idx] || 'white';
+    ctx.fillText(`${idx + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+
+    ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
+
+    await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+  }
+
+  await drawRantopWatermark(ctx);
+  await drawCreatorWatermark(ctx);
+
+  return canvas;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// createBaseOverlayImage — pre-edited pipeline: title + watermarks only
+// ─────────────────────────────────────────────────────────────────────────────
+async function createBaseOverlayImage(title) {
+  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 1080, 1920);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
+  await drawTitleBlock(ctx, title);
+  await drawRantopWatermark(ctx);
+  await drawCreatorWatermark(ctx);
+
+  return canvas;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// createRankOverlayImage — pre-edited pipeline: single rank entry
+// ─────────────────────────────────────────────────────────────────────────────
+async function createRankOverlayImage(ranks, rankIndex, boxH) {
+  const canvas = createCanvas(1080, 1920), ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 1080, 1920);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
+  const y = LAYOUT_CONFIG.rankPaddingY + boxH + (rankIndex * LAYOUT_CONFIG.rankSpacing);
+  const rRes = fitTextToBox(ranks[rankIndex], LAYOUT_CONFIG.rankBoxWidth, LAYOUT_CONFIG.rankMaxLines, LAYOUT_CONFIG.rankFontSize);
+
+  ctx.shadowColor = LAYOUT_CONFIG.shadowColor;
+  ctx.shadowBlur = LAYOUT_CONFIG.shadowBlur;
+  ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+
+  ctx.font = `${LAYOUT_CONFIG.rankFontSize}px "CustomFont"`;
+  ctx.strokeStyle = 'black'; ctx.lineWidth = LAYOUT_CONFIG.textOutlineWidth;
+  ctx.strokeText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+  ctx.fillStyle = LAYOUT_CONFIG.rankColors[rankIndex] || 'white';
+  ctx.fillText(`${rankIndex + 1}.`, LAYOUT_CONFIG.rankNumX, y);
+
+  ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
+
+  await drawMixedText(ctx, rRes.lines[0], LAYOUT_CONFIG.rankTextX, y + ((LAYOUT_CONFIG.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', LAYOUT_CONFIG.textOutlineWidth);
+
+  return canvas;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// generateThumbnail
+// ─────────────────────────────────────────────────────────────────────────────
 async function generateThumbnail(videoPath, outputPath) {
   return spawnWithTimeout('ffmpeg', [
     '-i', videoPath, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', outputPath
   ], 30_000, 'Thumbnail');
 }
 
-// --- Shared helpers ---
-
-// Wraps spawn() with a hard timeout — kills the process and rejects if it
-// doesn't finish within `ms`. Prevents silent FFmpeg hangs from stalling forever.
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared spawn / download helpers
+// ─────────────────────────────────────────────────────────────────────────────
 function spawnWithTimeout(cmd, args, ms, label = 'Process') {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);
@@ -285,7 +534,6 @@ function spawnWithTimeout(cmd, args, ms, label = 'Process') {
   });
 }
 
-// Wraps GCS file.download() with a hard timeout.
 function downloadWithTimeout(gcsFile, destination, ms, label = 'Download') {
   return Promise.race([
     gcsFile.download({ destination }),
@@ -295,9 +543,28 @@ function downloadWithTimeout(gcsFile, destination, ms, label = 'Download') {
   ]);
 }
 
-// Composite overlay PNG onto a video clip
-function applyOverlay(inputPath, overlayPath, outputPath) {
-  const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
+// ─────────────────────────────────────────────────────────────────────────────
+// FFmpeg helpers
+// applyOverlay: for auto-stitch — 'blurred' backdrop pipes source through
+// a boxblur so the title area looks like a frosted glass effect.
+// ─────────────────────────────────────────────────────────────────────────────
+function applyOverlay(inputPath, overlayPath, outputPath, boxH = 0) {
+  let filter;
+
+  if (LAYOUT_CONFIG.titleBackdrop === 'blurred' && boxH > 0) {
+    // Blur only the top region (title box), composite full overlay on top
+    filter = [
+      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
+      `[scaled]split[full][forblur]`,
+      `[forblur]crop=1080:${Math.ceil(boxH)}:0:0,boxblur=20:5[blurred_top]`,
+      `[full][blurred_top]overlay=0:0[with_blur]`,
+      `[1:v]scale=1080:1920[ov]`,
+      `[with_blur][ov]overlay=0:0`,
+    ].join(';');
+  } else {
+    filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v];[1:v]scale=1080:1920[ov];[v][ov]overlay=0:0`;
+  }
+
   return spawnWithTimeout('ffmpeg', [
     '-i', inputPath, '-i', overlayPath,
     '-filter_complex', filter,
@@ -306,7 +573,6 @@ function applyOverlay(inputPath, overlayPath, outputPath) {
   ], 300_000, 'Overlay');
 }
 
-// Stitch a list of clips into one file
 function stitchClips(listPath, outputPath) {
   return spawnWithTimeout('ffmpeg', [
     '-f', 'concat', '-safe', '0', '-i', listPath,
@@ -314,7 +580,6 @@ function stitchClips(listPath, outputPath) {
   ], 120_000, 'Stitch');
 }
 
-// Cut a segment from a source file (pre-edited pipeline only)
 function cutSegment(sourcePath, startSec, endSec, outputPath) {
   return spawnWithTimeout('ffmpeg', [
     '-ss', String(startSec), '-i', sourcePath,
@@ -324,14 +589,15 @@ function cutSegment(sourcePath, startSec, endSec, outputPath) {
   ], 300_000, 'Cut');
 }
 
-// --- Pipeline: Auto-stitch (N separate uploaded clips) ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline: Auto-stitch (N separate uploaded clips)
+// ─────────────────────────────────────────────────────────────────────────────
 async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) {
   const tempFiles = [];
   try {
     await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
 
-    // Download all clips
     const local = await Promise.all(filePaths.map(async (fp, i) => {
       const p = `/tmp/in_${i}_${uuidv4()}${path.extname(fp) || '.mp4'}`;
       await downloadWithTimeout(cacheBucket.file(fp), p, 120_000, `Download clip ${i}`);
@@ -339,8 +605,9 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
       return p;
     }));
 
-    // Overlay each clip
+    const { boxH } = computeTitleBoxH(title);
     const processed = [];
+
     for (let i = 0; i < local.length; i++) {
       const prog = 10 + Math.floor((i / local.length) * 60);
       await updateStatusFile(postId, 'PROCESSING', { progress: prog });
@@ -351,11 +618,10 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
 
       const canvas = await createTextOverlayImage(title, parsedRanks, i + 1);
       fs.writeFileSync(ovPath, canvas.toBuffer('image/png'));
-      await applyOverlay(local[i], ovPath, outPath);
+      await applyOverlay(local[i], ovPath, outPath, boxH);
       processed.push(outPath);
     }
 
-    // Stitch
     await updateStatusFile(postId, 'PROCESSING', { progress: 80 });
     const listPath = `/tmp/l_${uuidv4()}.txt`;
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
@@ -363,7 +629,6 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
     fs.writeFileSync(listPath, processed.map(p => `file '${p}'`).join('\n'));
     await stitchClips(listPath, finalPath);
 
-    // Thumbnail & upload
     await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
     const thumbPath = `/tmp/t_${uuidv4()}.jpg`;
     tempFiles.push(thumbPath);
@@ -389,11 +654,9 @@ async function processAutoStitch(req, res, { postId, title, ranks, filePaths }) 
   }
 }
 
-// --- Pipeline: Pre-edited (single source file, timed text overlays) ---
-// The source video plays untouched. One base overlay (title + watermark) is
-// always visible for the ENTIRE video duration — no enable= expression needed.
-// Each rank gets its own PNG, enabled from its timestamp to endTime so they
-// stack up as the video progresses, then all disappear together at endTime.
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline: Pre-edited (single source file, timed text overlays)
+// ─────────────────────────────────────────────────────────────────────────────
 async function processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime }) {
   const tempFiles = [];
   try {
@@ -401,46 +664,30 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
 
-    // Download source file
     await updateStatusFile(postId, 'PROCESSING', { progress: 10 });
     const sourcePath = `/tmp/source_${uuidv4()}${path.extname(filePath) || '.mp4'}`;
     await downloadWithTimeout(cacheBucket.file(filePath), sourcePath, 120_000, 'Download source');
     tempFiles.push(sourcePath);
 
-    // Build overlay states — now we only need the timestamps, no ranksToShow state
     await updateStatusFile(postId, 'PROCESSING', { progress: 20 });
     const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
 
-    // Pre-calculate boxH once so rank overlays align with the base
     const { boxH } = computeTitleBoxH(title);
 
-    // Generate base overlay (title + watermark).
-    // No enable= expression — it is composited for the full video duration.
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     fs.writeFileSync(basePath, (await createBaseOverlayImage(title)).toBuffer('image/png'));
 
-    // Rank reveal order: highest rank index appears first (most suspense).
-    // sortedTimestamps[0] is the earliest mark → assign to the last rank (parsedRanks.length - 1),
-    // sortedTimestamps[1] → second-to-last rank, etc.
-    // Each rank stays visible from its assigned timestamp until endTime so they accumulate.
     const rankPaths = [];
     for (let i = 0; i < parsedRanks.length; i++) {
       await updateStatusFile(postId, 'PROCESSING', { progress: 25 + Math.floor((i / parsedRanks.length) * 35) });
       const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
       tempFiles.push(rankPath);
-      // Reverse: timestamp slot 0 → last rank, slot 1 → second-to-last, etc.
       const rankIndex = parsedRanks.length - 1 - i;
       fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, rankIndex, boxH)).toBuffer('image/png'));
       rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
     }
 
-    // Build single FFmpeg pass:
-    //   [0:v]  scale+crop                                                    → [base_v]
-    //   [1:v]  base overlay (title+watermark), no enable= → always visible  → [v_base]
-    //   [2:v]  rank N-1 PNG, enable='between(t, ts[0].time, endTime)'       → [v0]
-    //   [3:v]  rank N-2 PNG, enable='between(t, ts[1].time, endTime)'       → [v1]
-    //   ...rank 0 (highest priority / last revealed) at final timestamp
     await updateStatusFile(postId, 'PROCESSING', { progress: 65 });
 
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
@@ -449,19 +696,36 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const inputArgs = ['-i', sourcePath, '-i', basePath];
     for (const { path } of rankPaths) inputArgs.push('-i', path);
 
-    const filterParts = [
-      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[base_v]`,
+    // For 'blurred' backdrop, blur the video's top region before compositing
+    const filterParts = [];
+    let scaledLabel;
+
+    if (LAYOUT_CONFIG.titleBackdrop === 'blurred') {
+      filterParts.push(
+        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
+        `[scaled]split[full][forblur]`,
+        `[forblur]crop=1080:${Math.ceil(boxH)}:0:0,boxblur=20:5[blurred_top]`,
+        `[full][blurred_top]overlay=0:0[v_preblur]`,
+      );
+      scaledLabel = 'v_preblur';
+    } else {
+      filterParts.push(
+        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v_scaled]`,
+      );
+      scaledLabel = 'v_scaled';
+    }
+
+    filterParts.push(
       `[1:v]scale=1080:1920[base_ov]`,
-      // No enable= on the base overlay — title and watermark are always visible
-      `[base_v][base_ov]overlay=0:0[v_base]`,
-    ];
+      `[${scaledLabel}][base_ov]overlay=0:0[v_base]`,
+    );
+
     let prevLabel = 'v_base';
     for (let i = 0; i < rankPaths.length; i++) {
       const { timestampSlot } = rankPaths[i];
       const start = sortedTimestamps[timestampSlot]?.time ?? 0;
       const inputIdx = i + 2;
       filterParts.push(`[${inputIdx}:v]scale=1080:1920[r${i}]`);
-      // Each rank overlay is only active between its reveal timestamp and endTime
       filterParts.push(`[${prevLabel}][r${i}]overlay=0:0:enable='between(t,${start},${parsedEndTime})'[v${i}]`);
       prevLabel = `v${i}`;
     }
@@ -477,7 +741,6 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       '-y', finalPath
     ], 600_000, 'Pre-edited overlay');
 
-    // Thumbnail & upload
     await updateStatusFile(postId, 'PROCESSING', { progress: 90 });
     const thumbPath = `/tmp/t_${uuidv4()}.jpg`;
     tempFiles.push(thumbPath);
@@ -503,9 +766,20 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
   }
 }
 
-// --- Main HTTP Function ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Main HTTP Function
+// ─────────────────────────────────────────────────────────────────────────────
 functions.http('processVideos', async (req, res) => {
-  const { action, videoCount, sessionId, fileTypes, fileType, title, ranks, filePaths, filePath, timestamps, endTime, postId, videoMode } = req.body;
+  const {
+    action, videoCount, sessionId, fileTypes, fileType,
+    title, ranks, filePaths, filePath, timestamps, endTime,
+    postId, videoMode,
+    // NEW: optional layout config from client
+    layoutConfig,
+  } = req.body;
+
+  // Resolve layout config for this request (client overrides > preset > defaults)
+  LAYOUT_CONFIG = resolveLayoutConfig(layoutConfig || {});
 
   // 1. Check Status
   if (action === 'checkStatus') {
