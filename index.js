@@ -27,6 +27,13 @@ const DEFAULT_LAYOUT_CONFIG = {
   titleBackdrop: 'black',
   titleWordColors: [],
   titleDefaultColor: 'white',
+  
+  // Localized Shadow Settings
+  titleShadowBlur: 25,
+  titleShadowColor: 'rgba(0,0,0,0.8)',
+  rankShadowBlur: 25,
+  rankShadowColor: 'rgba(0,0,0,0.8)',
+
   subtitle: '',
   subtitleFontSize: 44,
   subtitleColor: '#CCCCCC',
@@ -39,8 +46,7 @@ const DEFAULT_LAYOUT_CONFIG = {
   rankBoxWidth: 830,
   rankMaxLines: 1,
   textOutlineWidth: 18,
-  shadowBlur: 25,
-  shadowColor: 'rgba(0,0,0,0.8)',
+
   watermarkText: 'ranktop.net',
   watermarkFontSize: 48,
   watermarkPadding: 20,
@@ -58,8 +64,10 @@ const STYLE_PRESETS = {
   viral: {
     titleBackdrop: 'black',
     textOutlineWidth: 22,
-    shadowBlur: 35,
-    shadowColor: 'rgba(0,0,0,0.9)',
+    titleShadowBlur: 35,
+    titleShadowColor: 'rgba(0,0,0,0.9)',
+    rankShadowBlur: 35,
+    rankShadowColor: 'rgba(0,0,0,0.9)',
     rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', '#FF6B6B', '#FF6B6B'],
     subtitleColor: '#FFD700',
   },
@@ -67,8 +75,10 @@ const STYLE_PRESETS = {
     titleBackdrop: 'white',
     titleDefaultColor: 'black',
     textOutlineWidth: 0,
-    shadowBlur: 0,
-    shadowColor: 'rgba(0,0,0,0)',
+    titleShadowBlur: 0,
+    titleShadowColor: 'rgba(0,0,0,0)',
+    rankShadowBlur: 0,
+    rankShadowColor: 'rgba(0,0,0,0)',
     rankColors: ['#222222', '#444444', '#666666', '#888888', '#888888'],
     watermarkOpacity: 0.3,
     subtitleColor: '#555555',
@@ -77,8 +87,10 @@ const STYLE_PRESETS = {
     titleBackdrop: 'black',
     titleDefaultColor: 'white',
     textOutlineWidth: 14,
-    shadowBlur: 30,
-    shadowColor: 'rgba(0,0,0,1)',
+    titleShadowBlur: 30,
+    titleShadowColor: 'rgba(0,0,0,1)',
+    rankShadowBlur: 30,
+    rankShadowColor: 'rgba(0,0,0,1)',
     subtitleColor: '#AAAAAA',
   },
 };
@@ -218,10 +230,12 @@ function buildWordColorMap(wordColors) {
 
 async function drawColoredTitleLine(ctx, line, x, y, fontSize, config) {
   const wordColorMap = buildWordColorMap(config.titleWordColors);
-  const strokeColor = config.titleBackdrop === 'white' ? 'rgba(255,255,255,0.6)' : 'black';
+  
+  // FIX: Shadow remains black even on white backdrop
+  const strokeColor = 'black'; 
 
-  ctx.shadowColor = config.shadowColor;
-  ctx.shadowBlur = config.shadowBlur;
+  ctx.shadowColor = config.titleShadowColor;
+  ctx.shadowBlur = config.titleShadowBlur;
   ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
 
   const words = line.split(' ');
@@ -268,13 +282,8 @@ async function drawTitleBlock(ctx, title, config) {
   if (config.titleBackdrop === 'black' || config.titleBackdrop === 'white') {
     ctx.fillStyle = config.titleBackdrop;
     ctx.fillRect(0, 0, 1080, boxH);
-  } else if (config.titleBackdrop === 'blurred') {
-    const grad = ctx.createLinearGradient(0, 0, 0, boxH);
-    grad.addColorStop(0, 'rgba(0,0,0,0.82)');
-    grad.addColorStop(1, 'rgba(0,0,0,0.55)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 1080, boxH);
-  }
+  } 
+  // FIX: Removed gradient tint for 'blurred' backdrop. FFmpeg handles the blur.
 
   const subtitleH = config.subtitle ? config.subtitleTopMargin + config.subtitleFontSize : 0;
   let currY = ((boxH - subtitleH) - textH) / 2;
@@ -287,20 +296,23 @@ async function drawTitleBlock(ctx, title, config) {
 
   if (config.subtitle) {
     const subW = measureMixedText(ctx, config.subtitle, config.subtitleFontSize, config);
-    const outline = config.titleBackdrop === 'white' ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.7)';
-    await drawMixedText(ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, config.subtitleFontSize, config.subtitleColor, outline, config.textOutlineWidth * 0.5, config);
+    await drawMixedText(ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, config.subtitleFontSize, config.subtitleColor, 'black', config.textOutlineWidth * 0.5, config);
   }
 
   return boxH;
 }
 
 async function drawWatermarks(ctx, config) {
+  // FIX: Hardcoded watermark shadow/stroke to isolate it from localized config changes
+  const fixedShadowColor = 'rgba(0,0,0,0.8)';
+  const fixedShadowBlur = 15;
+
   // Ranktop watermark
   const wmW = measureMixedText(ctx, config.watermarkText, config.watermarkFontSize, config);
   ctx.save();
   ctx.globalAlpha = config.watermarkOpacity;
-  ctx.shadowColor = config.shadowColor;
-  ctx.shadowBlur = config.shadowBlur * 0.6;
+  ctx.shadowColor = fixedShadowColor;
+  ctx.shadowBlur = fixedShadowBlur;
   await drawMixedText(
     ctx, config.watermarkText,
     1080 - wmW - config.watermarkPadding,
@@ -314,6 +326,8 @@ async function drawWatermarks(ctx, config) {
     const cwW = measureMixedText(ctx, config.creatorWatermark, config.creatorWatermarkFontSize, config);
     ctx.save();
     ctx.globalAlpha = config.creatorWatermarkOpacity;
+    ctx.shadowColor = fixedShadowColor;
+    ctx.shadowBlur = fixedShadowBlur;
     await drawMixedText(
       ctx, config.creatorWatermark, (1080 - cwW) / 2,
       1920 - config.creatorWatermarkFontSize - config.creatorWatermarkBottomPadding,
@@ -338,8 +352,8 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
     const y = config.rankPaddingY + boxH + (idx * config.rankSpacing);
     const rRes = fitTextToBox(ranks[idx], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
 
-    ctx.shadowColor = config.shadowColor;
-    ctx.shadowBlur = config.shadowBlur;
+    ctx.shadowColor = config.rankShadowColor;
+    ctx.shadowBlur = config.rankShadowBlur;
     ctx.font = `${config.rankFontSize}px "CustomFont"`;
     ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
     ctx.strokeText(`${idx + 1}.`, config.rankNumX, y);
@@ -372,8 +386,8 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
   const y = config.rankPaddingY + boxH + (rankIndex * config.rankSpacing);
   const rRes = fitTextToBox(ranks[rankIndex], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
 
-  ctx.shadowColor = config.shadowColor;
-  ctx.shadowBlur = config.shadowBlur;
+  ctx.shadowColor = config.rankShadowColor;
+  ctx.shadowBlur = config.rankShadowBlur;
   ctx.font = `${config.rankFontSize}px "CustomFont"`;
   ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
   ctx.strokeText(`${rankIndex + 1}.`, config.rankNumX, y);
