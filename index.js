@@ -27,11 +27,9 @@ const DEFAULT_LAYOUT_CONFIG = {
   titleBackdrop: 'black',
   titleWordColors: [],
   titleDefaultColor: 'white',
-  
-  // Localized Shadow Settings
   titleShadowBlur: 25,
   titleShadowColor: 'rgba(0,0,0,0.8)',
-  rankShadowBlur: 25,
+  rankShadowBlur: 5,
   rankShadowColor: 'rgba(0,0,0,0.8)',
 
   subtitle: '',
@@ -65,9 +63,7 @@ const STYLE_PRESETS = {
     titleBackdrop: 'black',
     textOutlineWidth: 22,
     titleShadowBlur: 35,
-    titleShadowColor: 'rgba(0,0,0,0.9)',
-    rankShadowBlur: 35,
-    rankShadowColor: 'rgba(0,0,0,0.9)',
+    rankShadowBlur: 10,
     rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', '#FF6B6B', '#FF6B6B'],
     subtitleColor: '#FFD700',
   },
@@ -76,9 +72,7 @@ const STYLE_PRESETS = {
     titleDefaultColor: 'black',
     textOutlineWidth: 0,
     titleShadowBlur: 0,
-    titleShadowColor: 'rgba(0,0,0,0)',
     rankShadowBlur: 0,
-    rankShadowColor: 'rgba(0,0,0,0)',
     rankColors: ['#222222', '#444444', '#666666', '#888888', '#888888'],
     watermarkOpacity: 0.3,
     subtitleColor: '#555555',
@@ -88,9 +82,7 @@ const STYLE_PRESETS = {
     titleDefaultColor: 'white',
     textOutlineWidth: 14,
     titleShadowBlur: 30,
-    titleShadowColor: 'rgba(0,0,0,1)',
-    rankShadowBlur: 30,
-    rankShadowColor: 'rgba(0,0,0,1)',
+    rankShadowBlur: 12,
     subtitleColor: '#AAAAAA',
   },
 };
@@ -283,20 +275,24 @@ async function drawTitleBlock(ctx, title, config) {
     ctx.fillStyle = config.titleBackdrop;
     ctx.fillRect(0, 0, 1080, boxH);
   } 
-  // FIX: Removed gradient tint for 'blurred' backdrop. FFmpeg handles the blur.
 
   const subtitleH = config.subtitle ? config.subtitleTopMargin + config.subtitleFontSize : 0;
   let currY = ((boxH - subtitleH) - textH) / 2;
 
   for (const line of titleRes.lines) {
     const lw = measureMixedText(ctx, line, titleRes.fontSize, config);
+    // Center the Title Line
     await drawColoredTitleLine(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, config);
     currY += titleRes.fontSize + config.titleLineSpacing;
   }
 
   if (config.subtitle) {
     const subW = measureMixedText(ctx, config.subtitle, config.subtitleFontSize, config);
-    await drawMixedText(ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, config.subtitleFontSize, config.subtitleColor, 'black', config.textOutlineWidth * 0.5, config);
+    // Use Subtitle Color from config
+    await drawMixedText(
+      ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, 
+      config.subtitleFontSize, config.subtitleColor, 'black', config.textOutlineWidth * 0.5, config
+    );
   }
 
   return boxH;
@@ -386,16 +382,25 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
   const y = config.rankPaddingY + boxH + (rankIndex * config.rankSpacing);
   const rRes = fitTextToBox(ranks[rankIndex], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
 
+  // Apply Rank Shadow from config
   ctx.shadowColor = config.rankShadowColor;
   ctx.shadowBlur = config.rankShadowBlur;
+  
   ctx.font = `${config.rankFontSize}px "CustomFont"`;
   ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
   ctx.strokeText(`${rankIndex + 1}.`, config.rankNumX, y);
+  
+  // Rank Number Color
   ctx.fillStyle = config.rankColors[rankIndex] || 'white';
   ctx.fillText(`${rankIndex + 1}.`, config.rankNumX, y);
+  
   ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
 
-  await drawMixedText(ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', config.textOutlineWidth, config);
+  // Rank Text (Always white with black stroke)
+  await drawMixedText(
+    ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), 
+    rRes.fontSize, 'white', 'black', config.textOutlineWidth, config
+  );
   return canvas;
 }
 
@@ -534,18 +539,26 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     await downloadWithTimeout(cacheBucket.file(filePath), sourcePath, 120000, 'Download source');
     tempFiles.push(sourcePath);
 
+    // Dynamic Title Box Calculation
     const { boxH } = computeTitleBoxH(title, config);
+    
+    // Create Base Overlay (Title + Watermark)
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     fs.writeFileSync(basePath, (await createBaseOverlayImage(title, config)).toBuffer('image/png'));
 
     const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
     const rankPaths = [];
+    
+    // Create individual Rank Overlays
     for (let i = 0; i < parsedRanks.length; i++) {
       const prog = 25 + Math.floor((i / parsedRanks.length) * 35);
       await updateStatusFile(postId, 'PROCESSING', { progress: prog });
+      
       const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
       tempFiles.push(rankPath);
+      
+      // rankIndex for color selection
       const rankIndex = parsedRanks.length - 1 - i;
       fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, rankIndex, boxH, config)).toBuffer('image/png'));
       rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
@@ -556,8 +569,10 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const inputArgs = ['-i', sourcePath, '-i', basePath];
     for (const { path } of rankPaths) inputArgs.push('-i', path);
 
+    // FFmpeg Filter Construction
     const filterParts = [];
     let scaledLabel;
+    
     if (config.titleBackdrop === 'blurred') {
       filterParts.push(
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
@@ -571,8 +586,10 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       scaledLabel = 'v_scaled';
     }
 
+    // Apply Base Title
     filterParts.push(`[1:v]scale=1080:1920[base_ov]`, `[${scaledLabel}][base_ov]overlay=0:0[v_base]`);
 
+    // Apply Timed Ranks
     let prevLabel = 'v_base';
     for (let i = 0; i < rankPaths.length; i++) {
       const { timestampSlot } = rankPaths[i];
