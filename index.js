@@ -639,10 +639,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
 functions.http('processVideos', async (req, res) => {
   const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
-  const {
-    action, title, ranks, filePaths, filePath, timestamps, endTime,
-    postId, videoMode, layoutConfig: rawClientConfig
-  } = body;
+  const { action, videoCount, sessionId, fileTypes, fileType, title, ranks, filePaths, filePath, timestamps, endTime, postId, videoMode, layoutConfig: rawClientConfig } = body;
 
   let clientConfig = rawClientConfig;
   if (typeof clientConfig === 'string') {
