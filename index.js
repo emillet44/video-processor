@@ -532,6 +532,8 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
   const tempFiles = [];
   try {
     await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
+    
+    // 1. Ensure all types are correct
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
 
@@ -539,18 +541,19 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     await downloadWithTimeout(cacheBucket.file(filePath), sourcePath, 120000, 'Download source');
     tempFiles.push(sourcePath);
 
-    // Dynamic Title Box Calculation
+    // 2. Compute dynamic height based on custom Title Style
     const { boxH } = computeTitleBoxH(title, config);
     
-    // Create Base Overlay (Title + Watermark)
+    // 3. Create Title + Watermark Overlay
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
-    fs.writeFileSync(basePath, (await createBaseOverlayImage(title, config)).toBuffer('image/png'));
+    const baseCanvas = await createBaseOverlayImage(title, config);
+    fs.writeFileSync(basePath, baseCanvas.toBuffer('image/png'));
 
     const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
     const rankPaths = [];
-    
-    // Create individual Rank Overlays
+
+    // 4. Generate Rank Overlays
     for (let i = 0; i < parsedRanks.length; i++) {
       const prog = 25 + Math.floor((i / parsedRanks.length) * 35);
       await updateStatusFile(postId, 'PROCESSING', { progress: prog });
@@ -558,21 +561,23 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
       tempFiles.push(rankPath);
       
-      // rankIndex for color selection
       const rankIndex = parsedRanks.length - 1 - i;
-      fs.writeFileSync(rankPath, (await createRankOverlayImage(parsedRanks, rankIndex, boxH, config)).toBuffer('image/png'));
+      
+      const rankCanvas = await createRankOverlayImage(parsedRanks, rankIndex, boxH, config);
+      fs.writeFileSync(rankPath, rankCanvas.toBuffer('image/png'));
       rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
     }
 
+    // 5. FFmpeg Filter Construction
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
     tempFiles.push(finalPath);
     const inputArgs = ['-i', sourcePath, '-i', basePath];
     for (const { path } of rankPaths) inputArgs.push('-i', path);
 
-    // FFmpeg Filter Construction
     const filterParts = [];
     let scaledLabel;
     
+    // Backdrop blur logic using current boxH
     if (config.titleBackdrop === 'blurred') {
       filterParts.push(
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
@@ -586,10 +591,10 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       scaledLabel = 'v_scaled';
     }
 
-    // Apply Base Title
+    // Apply the Title layer
     filterParts.push(`[1:v]scale=1080:1920[base_ov]`, `[${scaledLabel}][base_ov]overlay=0:0[v_base]`);
 
-    // Apply Timed Ranks
+    // Apply the timed Rank layers
     let prevLabel = 'v_base';
     for (let i = 0; i < rankPaths.length; i++) {
       const { timestampSlot } = rankPaths[i];
@@ -632,11 +637,22 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
 // Main Handler
 // ─────────────────────────────────────────────────────────────────────────────
 functions.http('processVideos', async (req, res) => {
+  const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+
   const {
-    action, videoCount, sessionId, fileTypes, fileType,
-    title, ranks, filePaths, filePath, timestamps, endTime,
-    postId, videoMode, layoutConfig: clientConfig
-  } = req.body;
+    action, title, ranks, filePaths, filePath, timestamps, endTime,
+    postId, videoMode, layoutConfig: rawClientConfig
+  } = body;
+
+  let clientConfig = rawClientConfig;
+  if (typeof clientConfig === 'string') {
+    try {
+      clientConfig = JSON.parse(clientConfig);
+    } catch (e) {
+      console.error("Failed to parse layoutConfig string:", e);
+      clientConfig = {};
+    }
+  }
 
   const activeConfig = resolveLayoutConfig(clientConfig || {});
 
@@ -678,10 +694,16 @@ functions.http('processVideos', async (req, res) => {
   }
 
   if (videoMode === 'pre-edited') {
-    if (!filePath || !postId || !timestamps || !Array.isArray(timestamps) || timestamps.length === 0) {
+    const parsedTimestamps = typeof timestamps === 'string' ? JSON.parse(timestamps) : timestamps;
+    
+    if (!filePath || !postId || !parsedTimestamps || !Array.isArray(parsedTimestamps)) {
       return res.status(400).json({ error: "Missing filePath, postId, or timestamps" });
     }
-    return processPreEdited(req, res, { postId, title, ranks, filePath, timestamps, endTime, config: activeConfig });
+    return processPreEdited(req, res, { 
+      postId, title, ranks, filePath, 
+      timestamps: parsedTimestamps, 
+      endTime, config: activeConfig 
+    });
   } else {
     if (!filePaths || !postId) return res.status(400).json({ error: "Missing filePaths or postId" });
     return processAutoStitch(req, res, { postId, title, ranks, filePaths, config: activeConfig });
