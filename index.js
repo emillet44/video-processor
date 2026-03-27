@@ -12,7 +12,7 @@ const outputBucket = storage.bucket('ranktop-v');
 const thumbnailBucket = storage.bucket('ranktop-v-thumb');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LAYOUT CONFIG & PRESETS
+// LAYOUT CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const DEFAULT_LAYOUT_CONFIG = {
   fontPath: '/usr/share/fonts/truetype/custom/font.ttf',
@@ -24,7 +24,7 @@ const DEFAULT_LAYOUT_CONFIG = {
   titleMaxLines: 2,
   titleBoxTopPadding: 30,
   titleBoxBottomPadding: 40,
-  titleBackdrop: 'black',
+  titleBackdrop: 'black', // 'none', 'black', 'white', 'blurred'
   titleWordColors: [],
   titleDefaultColor: 'white',
   titleShadowBlur: 25,
@@ -37,7 +37,7 @@ const DEFAULT_LAYOUT_CONFIG = {
   subtitleColor: '#CCCCCC',
   subtitleTopMargin: 10,
   rankFontSize: 60,
-  rankSpacing: 140,
+  rankSpacing: 140, 
   rankPaddingY: 80,
   rankNumX: 45,
   rankTextX: 125,
@@ -52,45 +52,17 @@ const DEFAULT_LAYOUT_CONFIG = {
   creatorWatermark: '',
   creatorWatermarkFontSize: 44,
   creatorWatermarkOpacity: 0.7,
-  creatorWatermarkColor: 'white',
+  creatorWatermarkColor: '#FFFFFF',
   creatorWatermarkBottomPadding: 80,
-  stylePreset: 'default',
+  
+  matchRankColor: false, 
 };
 
-const STYLE_PRESETS = {
-  default: {},
-  viral: {
-    titleBackdrop: 'black',
-    textOutlineWidth: 22,
-    titleShadowBlur: 35,
-    rankShadowBlur: 10,
-    rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', '#FF6B6B', '#FF6B6B'],
-    subtitleColor: '#FFD700',
-  },
-  minimal: {
-    titleBackdrop: 'white',
-    titleDefaultColor: 'black',
-    textOutlineWidth: 0,
-    titleShadowBlur: 0,
-    rankShadowBlur: 0,
-    rankColors: ['#222222', '#444444', '#666666', '#888888', '#888888'],
-    watermarkOpacity: 0.3,
-    subtitleColor: '#555555',
-  },
-  dark: {
-    titleBackdrop: 'black',
-    titleDefaultColor: 'white',
-    textOutlineWidth: 14,
-    titleShadowBlur: 30,
-    rankShadowBlur: 12,
-    subtitleColor: '#AAAAAA',
-  },
-};
-
+/**
+ * Merges client-provided config with system defaults.
+ */
 function resolveLayoutConfig(clientConfig = {}) {
-  const preset = clientConfig.stylePreset || DEFAULT_LAYOUT_CONFIG.stylePreset;
-  const presetOverrides = STYLE_PRESETS[preset] || {};
-  return { ...DEFAULT_LAYOUT_CONFIG, ...presetOverrides, ...clientConfig };
+  return { ...DEFAULT_LAYOUT_CONFIG, ...clientConfig };
 }
 
 const emojiCache = new Map();
@@ -222,8 +194,6 @@ function buildWordColorMap(wordColors) {
 
 async function drawColoredTitleLine(ctx, line, x, y, fontSize, config) {
   const wordColorMap = buildWordColorMap(config.titleWordColors);
-  
-  // FIX: Shadow remains black even on white backdrop
   const strokeColor = 'black'; 
 
   ctx.shadowColor = config.titleShadowColor;
@@ -281,14 +251,12 @@ async function drawTitleBlock(ctx, title, config) {
 
   for (const line of titleRes.lines) {
     const lw = measureMixedText(ctx, line, titleRes.fontSize, config);
-    // Center the Title Line
     await drawColoredTitleLine(ctx, line, (1080 - lw) / 2, currY, titleRes.fontSize, config);
     currY += titleRes.fontSize + config.titleLineSpacing;
   }
 
   if (config.subtitle) {
     const subW = measureMixedText(ctx, config.subtitle, config.subtitleFontSize, config);
-    // Use Subtitle Color from config
     await drawMixedText(
       ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, 
       config.subtitleFontSize, config.subtitleColor, 'black', config.textOutlineWidth * 0.5, config
@@ -299,11 +267,9 @@ async function drawTitleBlock(ctx, title, config) {
 }
 
 async function drawWatermarks(ctx, config) {
-  // FIX: Hardcoded watermark shadow/stroke to isolate it from localized config changes
   const fixedShadowColor = 'rgba(0,0,0,0.8)';
   const fixedShadowBlur = 15;
 
-  // Ranktop watermark
   const wmW = measureMixedText(ctx, config.watermarkText, config.watermarkFontSize, config);
   ctx.save();
   ctx.globalAlpha = config.watermarkOpacity;
@@ -317,7 +283,6 @@ async function drawWatermarks(ctx, config) {
   );
   ctx.restore();
 
-  // Creator watermark
   if (config.creatorWatermark) {
     const cwW = measureMixedText(ctx, config.creatorWatermark, config.creatorWatermarkFontSize, config);
     ctx.save();
@@ -348,16 +313,23 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
     const y = config.rankPaddingY + boxH + (idx * config.rankSpacing);
     const rRes = fitTextToBox(ranks[idx], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
 
+    const rankColor = config.rankColors[idx] || 'white';
+
     ctx.shadowColor = config.rankShadowColor;
     ctx.shadowBlur = config.rankShadowBlur;
     ctx.font = `${config.rankFontSize}px "CustomFont"`;
     ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
     ctx.strokeText(`${idx + 1}.`, config.rankNumX, y);
-    ctx.fillStyle = config.rankColors[idx] || 'white';
+    ctx.fillStyle = rankColor;
     ctx.fillText(`${idx + 1}.`, config.rankNumX, y);
     ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
 
-    await drawMixedText(ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), rRes.fontSize, 'white', 'black', config.textOutlineWidth, config);
+    const textColor = config.matchRankColor ? rankColor : 'white';
+
+    await drawMixedText(
+      ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), 
+      rRes.fontSize, textColor, 'black', config.textOutlineWidth, config
+    );
   }
 
   await drawWatermarks(ctx, config);
@@ -381,8 +353,8 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
 
   const y = config.rankPaddingY + boxH + (rankIndex * config.rankSpacing);
   const rRes = fitTextToBox(ranks[rankIndex], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
+  const rankColor = config.rankColors[rankIndex] || 'white';
 
-  // Apply Rank Shadow from config
   ctx.shadowColor = config.rankShadowColor;
   ctx.shadowBlur = config.rankShadowBlur;
   
@@ -390,22 +362,22 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
   ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
   ctx.strokeText(`${rankIndex + 1}.`, config.rankNumX, y);
   
-  // Rank Number Color
-  ctx.fillStyle = config.rankColors[rankIndex] || 'white';
+  ctx.fillStyle = rankColor;
   ctx.fillText(`${rankIndex + 1}.`, config.rankNumX, y);
   
   ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
 
-  // Rank Text (Always white with black stroke)
+  const textColor = config.matchRankColor ? rankColor : 'white';
+
   await drawMixedText(
     ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), 
-    rRes.fontSize, 'white', 'black', config.textOutlineWidth, config
+    rRes.fontSize, textColor, 'black', config.textOutlineWidth, config
   );
   return canvas;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FFmpeg & System Helpers
+// FFmpeg Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 function spawnWithTimeout(cmd, args, ms, label = 'Process') {
   return new Promise((resolve, reject) => {
@@ -533,7 +505,6 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
   try {
     await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
     
-    // 1. Ensure all types are correct
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
 
@@ -541,10 +512,8 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     await downloadWithTimeout(cacheBucket.file(filePath), sourcePath, 120000, 'Download source');
     tempFiles.push(sourcePath);
 
-    // 2. Compute dynamic height based on custom Title Style
     const { boxH } = computeTitleBoxH(title, config);
     
-    // 3. Create Title + Watermark Overlay
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     const baseCanvas = await createBaseOverlayImage(title, config);
@@ -553,7 +522,6 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const sortedTimestamps = [...timestamps].sort((a, b) => a.time - b.time);
     const rankPaths = [];
 
-    // 4. Generate Rank Overlays
     for (let i = 0; i < parsedRanks.length; i++) {
       const prog = 25 + Math.floor((i / parsedRanks.length) * 35);
       await updateStatusFile(postId, 'PROCESSING', { progress: prog });
@@ -568,7 +536,6 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
     }
 
-    // 5. FFmpeg Filter Construction
     const finalPath = `/tmp/f_${uuidv4()}.mp4`;
     tempFiles.push(finalPath);
     const inputArgs = ['-i', sourcePath, '-i', basePath];
@@ -577,7 +544,6 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     const filterParts = [];
     let scaledLabel;
     
-    // Backdrop blur logic using current boxH
     if (config.titleBackdrop === 'blurred') {
       filterParts.push(
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
@@ -591,10 +557,8 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
       scaledLabel = 'v_scaled';
     }
 
-    // Apply the Title layer
     filterParts.push(`[1:v]scale=1080:1920[base_ov]`, `[${scaledLabel}][base_ov]overlay=0:0[v_base]`);
 
-    // Apply the timed Rank layers
     let prevLabel = 'v_base';
     for (let i = 0; i < rankPaths.length; i++) {
       const { timestampSlot } = rankPaths[i];
