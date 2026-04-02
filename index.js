@@ -15,7 +15,7 @@ const thumbnailBucket = storage.bucket('ranktop-v-thumb');
 // LAYOUT CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const DEFAULT_LAYOUT_CONFIG = {
-  fontPath: '/usr/share/fonts/truetype/custom/font.ttf',
+  fontFamily: 'Archivo Expanded Bold',
   chineseFont: 'Noto Sans CJK SC',
   rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
   titleFontSize: 100,
@@ -44,6 +44,7 @@ const DEFAULT_LAYOUT_CONFIG = {
   rankBoxWidth: 830,
   rankMaxLines: 1,
   textOutlineWidth: 18,
+  textShadow: true, // Text outline toggle
 
   watermarkText: 'ranktop.net',
   watermarkFontSize: 48,
@@ -65,9 +66,23 @@ function resolveLayoutConfig(clientConfig = {}) {
   return { ...DEFAULT_LAYOUT_CONFIG, ...clientConfig };
 }
 
+// Map logical names to internal server paths
+const FONT_MAP = {
+  'Archivo Expanded Bold': '/usr/share/fonts/truetype/custom/Archivo-Expanded-Bold.ttf',
+  'Arial Regular': '/usr/share/fonts/truetype/custom/Arial-Regular.ttf'
+};
+
 const emojiCache = new Map();
-if (fs.existsSync(DEFAULT_LAYOUT_CONFIG.fontPath)) {
-  registerFont(DEFAULT_LAYOUT_CONFIG.fontPath, { family: 'CustomFont' });
+
+// Register available fonts
+for (const [family, fontPath] of Object.entries(FONT_MAP)) {
+  if (fs.existsSync(fontPath)) {
+    registerFont(fontPath, { family });
+  }
+}
+
+function getBaseFontFamily(config) {
+  return config.fontFamily || 'Archivo Expanded Bold';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +134,7 @@ function getEmojiUrl(emoji) {
 function getFontForChar(char, config) {
   if (/\p{Extended_Pictographic}/u.test(char)) return 'Emoji';
   if (/[\u4e00-\u9fa5]|[\u3040-\u30ff]|[\uff00-\uffef]/.test(char)) return config.chineseFont;
-  return 'CustomFont';
+  return getBaseFontFamily(config);
 }
 
 function segmentTextByFont(text, config) {
@@ -158,6 +173,8 @@ function measureMixedText(ctx, text, fontSize, config) {
 async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle, lineWidth, config) {
   const segments = segmentTextByFont(text, config);
   let currentX = x;
+  const drawOutline = config.textShadow !== false;
+
   for (const s of segments) {
     if (s.font === 'Emoji') {
       const emojis = Array.from(s.text);
@@ -172,7 +189,7 @@ async function drawMixedText(ctx, text, x, y, fontSize, fillStyle, strokeStyle, 
       }
     } else {
       ctx.font = `${fontSize}px "${s.font}"`;
-      if (strokeStyle && lineWidth > 0) {
+      if (drawOutline && strokeStyle && lineWidth > 0) {
         ctx.strokeStyle = strokeStyle;
         ctx.lineWidth = lineWidth;
         ctx.strokeText(s.text, currentX, y);
@@ -197,7 +214,7 @@ async function drawColoredTitleLine(ctx, line, x, y, fontSize, config) {
   const strokeColor = 'black'; 
 
   ctx.shadowColor = config.titleShadowColor;
-  ctx.shadowBlur = config.titleShadowBlur;
+  ctx.shadowBlur = config.titleShadowBlur || 0;
   ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
 
   const words = line.split(' ');
@@ -307,6 +324,7 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
   ctx.textBaseline = 'top'; ctx.textAlign = 'left';
 
   const boxH = await drawTitleBlock(ctx, title, config);
+  const drawOutline = config.textShadow !== false;
 
   for (let i = 0; i < ranksToShow; i++) {
     const idx = (ranks.length - ranksToShow) + i;
@@ -316,10 +334,13 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
     const rankColor = config.rankColors[idx] || 'white';
 
     ctx.shadowColor = config.rankShadowColor;
-    ctx.shadowBlur = config.rankShadowBlur;
-    ctx.font = `${config.rankFontSize}px "CustomFont"`;
-    ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
-    ctx.strokeText(`${idx + 1}.`, config.rankNumX, y);
+    ctx.shadowBlur = config.rankShadowBlur || 0;
+    ctx.font = `${config.rankFontSize}px "${getBaseFontFamily(config)}"`;
+    
+    if (drawOutline) {
+      ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
+      ctx.strokeText(`${idx + 1}.`, config.rankNumX, y);
+    }
     ctx.fillStyle = rankColor;
     ctx.fillText(`${idx + 1}.`, config.rankNumX, y);
     ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
@@ -354,14 +375,16 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
   const y = config.rankPaddingY + boxH + (rankIndex * config.rankSpacing);
   const rRes = fitTextToBox(ranks[rankIndex], config.rankBoxWidth, config.rankMaxLines, config.rankFontSize, config);
   const rankColor = config.rankColors[rankIndex] || 'white';
+  const drawOutline = config.textShadow !== false;
 
   ctx.shadowColor = config.rankShadowColor;
-  ctx.shadowBlur = config.rankShadowBlur;
-  
-  ctx.font = `${config.rankFontSize}px "CustomFont"`;
-  ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
-  ctx.strokeText(`${rankIndex + 1}.`, config.rankNumX, y);
-  
+  ctx.shadowBlur = config.rankShadowBlur || 0;
+  ctx.font = `${config.rankFontSize}px "${getBaseFontFamily(config)}"`;
+
+  if (drawOutline) {
+    ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
+    ctx.strokeText(`${rankIndex + 1}.`, config.rankNumX, y);
+  }
   ctx.fillStyle = rankColor;
   ctx.fillText(`${rankIndex + 1}.`, config.rankNumX, y);
   
