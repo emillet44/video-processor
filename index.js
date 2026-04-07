@@ -14,38 +14,54 @@ const thumbnailBucket = storage.bucket('ranktop-v-thumb');
 // ─────────────────────────────────────────────────────────────────────────────
 // LAYOUT CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The base defaults for all layout config fields.
+ * These match DEFAULT_VIDEO_STYLE + the hardcoded values from getDerivedVideoSettings
+ * (before scaling), so the server always renders at 1080x1920 (scale = 1.0).
+ */
 const DEFAULT_LAYOUT_CONFIG = {
   fontFamily: 'Archivo Expanded Bold',
   chineseFont: 'Noto Sans CJK SC',
-  rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
+
+  // Title
   titleFontSize: 100,
   titleLineSpacing: 30,
   titleBoxWidth: 980,
   titleMaxLines: 2,
   titleBoxTopPadding: 30,
   titleBoxBottomPadding: 40,
-  titleBackdrop: 'black', // 'none', 'black', 'white', 'blurred'
+  titleBackdrop: 'black',         // 'none' | 'black' | 'white' | 'blurred'
   titleWordColors: [],
   titleDefaultColor: 'white',
   titleShadowBlur: 25,
   titleShadowColor: 'rgba(0,0,0,0.8)',
-  rankShadowBlur: 5,
-  rankShadowColor: 'rgba(0,0,0,0.8)',
 
+  // Subtitle
   subtitle: '',
   subtitleFontSize: 44,
   subtitleColor: '#CCCCCC',
   subtitleTopMargin: 10,
+
+  // Ranks
   rankFontSize: 60,
-  rankSpacing: 140, 
+  rankSpacing: 140,
   rankPaddingY: 80,
   rankNumX: 45,
   rankTextX: 125,
   rankBoxWidth: 830,
   rankMaxLines: 1,
-  textOutlineWidth: 18,
-  textShadow: true, // Text outline toggle
+  rankColors: ['#FFD700', '#C0C0C0', '#CD7F32', 'white', 'white'],
+  rankShadowBlur: 5,
+  rankShadowColor: 'rgba(0,0,0,0.8)',
 
+  // Text styling
+  // NOTE: textOutlineWidth is NOT set here — it is derived in getDerivedSettings()
+  // based on fontFamily, so it is always computed fresh. If the client explicitly
+  // passes textOutlineWidth it will be respected as an override.
+  textShadow: true,
+
+  // Watermarks
   watermarkText: 'ranktop.net',
   watermarkFontSize: 48,
   watermarkPadding: 20,
@@ -55,15 +71,65 @@ const DEFAULT_LAYOUT_CONFIG = {
   creatorWatermarkOpacity: 0.7,
   creatorWatermarkColor: '#FFFFFF',
   creatorWatermarkBottomPadding: 80,
-  
-  matchRankColor: false, 
+
+  matchRankColor: false,
 };
 
 /**
- * Merges client-provided config with system defaults.
+ * Mirrors the frontend's getDerivedVideoSettings() at scale = 1.0 (full 1080x1920).
+ *
+ * Priority: explicit client override → computed default.
+ * This is the single source of truth for every dimension used by the renderers.
+ */
+function getDerivedSettings(clientConfig = {}) {
+  const SCALE = 1.0;
+
+  // textOutlineWidth: use explicit override if provided, otherwise derive from font
+  const baseOutlineWidth = clientConfig.textOutlineWidth != null
+    ? clientConfig.textOutlineWidth
+    : (clientConfig.fontFamily === 'Arial Regular' ? 9 : 18);
+
+  return {
+    // ── Typography ──
+    titleFontSize:                 (clientConfig.titleFontSize          ?? 100) * SCALE,
+    titleLineSpacing:              (clientConfig.titleLineSpacing        ?? 30)  * SCALE,
+    titleBoxWidth:                 (clientConfig.titleBoxWidth           ?? 980) * SCALE,
+    titleMaxLines:                  clientConfig.titleMaxLines           ?? 2,
+    titleBoxTopPadding:            (clientConfig.titleBoxTopPadding      ?? 30)  * SCALE,
+    titleBoxBottomPadding:         (clientConfig.titleBoxBottomPadding   ?? 40)  * SCALE,
+
+    subtitleFontSize:              (clientConfig.subtitleFontSize        ?? 44)  * SCALE,
+    subtitleTopMargin:             (clientConfig.subtitleTopMargin       ?? 10)  * SCALE,
+
+    rankFontSize:                  (clientConfig.rankFontSize            ?? 60)  * SCALE,
+    rankSpacing:                   (clientConfig.rankSpacing             ?? 140) * SCALE,
+    rankPaddingY:                  (clientConfig.rankPaddingY            ?? 80)  * SCALE,
+    rankNumX:                       45 * SCALE,
+    rankTextX:                      125 * SCALE,
+    rankBoxWidth:                  (clientConfig.rankBoxWidth            ?? 830) * SCALE,
+
+    textOutlineWidth:               baseOutlineWidth * SCALE,
+
+    // ── Fixed watermark geometry ──
+    watermarkFontSize:              48 * SCALE,
+    watermarkPadding:               20 * SCALE,
+    creatorWatermarkFontSize:       44 * SCALE,
+    creatorWatermarkBottomPadding:  80 * SCALE,
+  };
+}
+
+/**
+ * Merges client-provided config with system defaults, then attaches derived
+ * geometry so every downstream function can use a single flat config object.
  */
 function resolveLayoutConfig(clientConfig = {}) {
-  return { ...DEFAULT_LAYOUT_CONFIG, ...clientConfig };
+  // 1. Merge defaults with client overrides (client wins on every field)
+  const merged = { ...DEFAULT_LAYOUT_CONFIG, ...clientConfig };
+
+  // 2. Compute derived/scaled geometry and attach it
+  const derived = getDerivedSettings(clientConfig);
+
+  return { ...merged, ...derived };
 }
 
 // Map logical names to internal server paths
@@ -211,7 +277,7 @@ function buildWordColorMap(wordColors) {
 
 async function drawColoredTitleLine(ctx, line, x, y, fontSize, config) {
   const wordColorMap = buildWordColorMap(config.titleWordColors);
-  const strokeColor = 'black'; 
+  const strokeColor = 'black';
 
   ctx.shadowColor = config.titleShadowColor;
   ctx.shadowBlur = config.titleShadowBlur || 0;
@@ -261,7 +327,7 @@ async function drawTitleBlock(ctx, title, config) {
   if (config.titleBackdrop === 'black' || config.titleBackdrop === 'white') {
     ctx.fillStyle = config.titleBackdrop;
     ctx.fillRect(0, 0, 1080, boxH);
-  } 
+  }
 
   const subtitleH = config.subtitle ? config.subtitleTopMargin + config.subtitleFontSize : 0;
   let currY = ((boxH - subtitleH) - textH) / 2;
@@ -275,7 +341,7 @@ async function drawTitleBlock(ctx, title, config) {
   if (config.subtitle) {
     const subW = measureMixedText(ctx, config.subtitle, config.subtitleFontSize, config);
     await drawMixedText(
-      ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin, 
+      ctx, config.subtitle, (1080 - subW) / 2, currY + config.subtitleTopMargin,
       config.subtitleFontSize, config.subtitleColor, 'black', config.textOutlineWidth * 0.5, config
     );
   }
@@ -336,7 +402,7 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
     ctx.shadowColor = config.rankShadowColor;
     ctx.shadowBlur = config.rankShadowBlur || 0;
     ctx.font = `${config.rankFontSize}px "${getBaseFontFamily(config)}"`;
-    
+
     if (drawOutline) {
       ctx.strokeStyle = 'black'; ctx.lineWidth = config.textOutlineWidth;
       ctx.strokeText(`${idx + 1}.`, config.rankNumX, y);
@@ -348,7 +414,7 @@ async function createTextOverlayImage(title, ranks, ranksToShow, config) {
     const textColor = config.matchRankColor ? rankColor : 'white';
 
     await drawMixedText(
-      ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), 
+      ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2),
       rRes.fontSize, textColor, 'black', config.textOutlineWidth, config
     );
   }
@@ -387,13 +453,13 @@ async function createRankOverlayImage(ranks, rankIndex, boxH, config) {
   }
   ctx.fillStyle = rankColor;
   ctx.fillText(`${rankIndex + 1}.`, config.rankNumX, y);
-  
+
   ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
 
   const textColor = config.matchRankColor ? rankColor : 'white';
 
   await drawMixedText(
-    ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2), 
+    ctx, rRes.lines[0], config.rankTextX, y + ((config.rankFontSize - rRes.fontSize) / 2),
     rRes.fontSize, textColor, 'black', config.textOutlineWidth, config
   );
   return canvas;
@@ -527,7 +593,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
   const tempFiles = [];
   try {
     await updateStatusFile(postId, 'PROCESSING', { progress: 5 });
-    
+
     const parsedRanks = typeof ranks === 'string' ? JSON.parse(ranks) : ranks;
     const parsedEndTime = typeof endTime === 'string' ? parseFloat(endTime) : endTime;
 
@@ -536,7 +602,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     tempFiles.push(sourcePath);
 
     const { boxH } = computeTitleBoxH(title, config);
-    
+
     const basePath = `/tmp/base_${uuidv4()}.png`;
     tempFiles.push(basePath);
     const baseCanvas = await createBaseOverlayImage(title, config);
@@ -548,12 +614,12 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
     for (let i = 0; i < parsedRanks.length; i++) {
       const prog = 25 + Math.floor((i / parsedRanks.length) * 35);
       await updateStatusFile(postId, 'PROCESSING', { progress: prog });
-      
+
       const rankPath = `/tmp/rank_${i}_${uuidv4()}.png`;
       tempFiles.push(rankPath);
-      
+
       const rankIndex = parsedRanks.length - 1 - i;
-      
+
       const rankCanvas = await createRankOverlayImage(parsedRanks, rankIndex, boxH, config);
       fs.writeFileSync(rankPath, rankCanvas.toBuffer('image/png'));
       rankPaths.push({ path: rankPath, rankIndex, timestampSlot: i });
@@ -566,7 +632,7 @@ async function processPreEdited(req, res, { postId, title, ranks, filePath, time
 
     const filterParts = [];
     let scaledLabel;
-    
+
     if (config.titleBackdrop === 'blurred') {
       filterParts.push(
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled]`,
@@ -679,14 +745,14 @@ functions.http('processVideos', async (req, res) => {
 
   if (videoMode === 'pre-edited') {
     const parsedTimestamps = typeof timestamps === 'string' ? JSON.parse(timestamps) : timestamps;
-    
+
     if (!filePath || !postId || !parsedTimestamps || !Array.isArray(parsedTimestamps)) {
       return res.status(400).json({ error: "Missing filePath, postId, or timestamps" });
     }
-    return processPreEdited(req, res, { 
-      postId, title, ranks, filePath, 
-      timestamps: parsedTimestamps, 
-      endTime, config: activeConfig 
+    return processPreEdited(req, res, {
+      postId, title, ranks, filePath,
+      timestamps: parsedTimestamps,
+      endTime, config: activeConfig
     });
   } else {
     if (!filePaths || !postId) return res.status(400).json({ error: "Missing filePaths or postId" });
