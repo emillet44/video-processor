@@ -15,6 +15,7 @@ RUN mkdir -p /usr/share/fonts/truetype/custom
 # Copy BOTH fonts from your repo into the container
 COPY Archivo-Expanded-Bold.ttf /usr/share/fonts/truetype/custom/Archivo-Expanded-Bold.ttf
 COPY Arial-Regular.ttf /usr/share/fonts/truetype/custom/Arial-Regular.ttf
+COPY Rubik-Bold.ttf /usr/share/fonts/truetype/custom/Rubik-Bold.ttf
 
 # Rebuild font cache
 RUN fc-cache -f -v
